@@ -2,7 +2,13 @@
 
 A highly-scalable parallel Python map function running on Rust AWS lambdas.
 
-The framework imposes very little overhead: **1000 workers launch, run and return outputs in ~1s cold and ~0.5s warm** (for a [no-op worker](./benchmarks/echo_latency.py)).
+The framework imposes very little overhead for latency:
+
+> **1000 workers launch, run and return outputs in ~1s cold and ~0.5s warm** (for a [no-op worker](./benchmarks/echo_latency.py))
+
+While also being ideal for data-intensive applications:
+
+> **a four stage rechunk of the original ERA5 dataset (1 variable) 1.4TB takes ~140s and costs ~$2.45; 3.7x faster than Cubed** (from [rechunk-lambda-benchmarks](https://github.com/tomwhite/rechunk-lambda-benchmarks))
 
 Note: This library is alpha-quality. The API and its behaviour may change in the future.
 
