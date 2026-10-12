@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    name: pytest (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run pytest
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  wire:
+    name: pytest against a local lambda
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: uv sync --locked
+      - run: uv tool install cargo-lambda
+
+      # `watch` compiles each function on its first request, and the tests
+      # fail on a read timeout rather than waiting - so pay for the build
+      # here, where nothing is on the clock.
+      - run: cargo build --locked
+        working-directory: rust
+
+      - name: Serve the lambdas
+        working-directory: rust
+        run: |
+          cargo lambda watch --invoke-port 9000 >"$RUNNER_TEMP/watch.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/watch.pid"
+          # Only a diagnostic - `watch` binds the port before it has built
+          # anything, so the tests are what prove the functions answer. This
+          # gets the log in front of you instead of a connection error.
+          # No `curl -f`: `/` is not a function route, so any reply will do.
+          for _ in $(seq 60); do
+            if curl -s -o /dev/null http://localhost:9000/; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "cargo lambda watch never answered on port 9000"
+          cat "$RUNNER_TEMP/watch.log"
+          exit 1
+
+      - run: uv run pytest -m 'lambda_integration and not real_lambda'
+
+      - name: Stop the lambdas
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/watch.pid")" || true

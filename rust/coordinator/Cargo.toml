@@ -1,0 +1,34 @@
+[package]
+# Not `coordinator`: a client project's own crate uses that name
+name = "map-lambda-coordinator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "coordinator"
+path = "src/main.rs"
+
+# 900s is Lambda's maximum, and what the client's read timeout expects.
+[package.metadata.lambda.deploy]
+memory = 3538
+timeout = 900
+
+[dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-sdk-lambda = "1"
+aws-smithy-http-client = { version = "1", features = ["default-client", "rustls-aws-lc"] }
+aws-smithy-types = "1"
+fastrand = "2"
+futures = "0.3"
+lambda_runtime = "1.0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+aws-credential-types = { version = "1", features = ["test-util"] }
+aws-smithy-types = "1"
+http = "1"
+tokio = { version = "1", features = ["test-util"] }

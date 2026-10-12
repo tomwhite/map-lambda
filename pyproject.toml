@@ -1,0 +1,72 @@
+[project]
+name = "map-lambda"
+version = "0.1.0"
+authors = [
+    { name = "Tom White", email = "tom.e.white@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aioboto3>=15.5.0",
+    "aiostream",
+]
+
+[project.optional-dependencies]
+diagnostics = [
+    "matplotlib>=3.9",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["map_lambda*"]
+
+[tool.setuptools.package-data]
+map_lambda = ["py.typed"]
+
+[tool.pytest.ini_options]
+markers = [
+    "lambda_integration: requires a local `cargo lambda watch` server (fails without one, so deselected by default)",
+    "real_lambda: invokes a real deployed AWS Lambda (costs money, needs credentials; opt-in only, see tests/test_client.py)",
+]
+addopts = "--cov=map_lambda --cov=tests --cov-report=term-missing -m 'not real_lambda and not lambda_integration'"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["map_lambda", "tests", "benchmarks"]
+follow_imports_for_stubs = false
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["aioboto3.*", "botocore.*", "matplotlib.*"]
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "map-lambda[diagnostics]",
+    "mypy>=2.3.1",
+    "obstore>=0.11.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.5",
+]
