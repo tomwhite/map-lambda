@@ -1511,9 +1511,18 @@ dependencies = [
  "futures",
  "http 1.5.0",
  "lambda_runtime",
+ "map-lambda-protocol",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "map-lambda-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

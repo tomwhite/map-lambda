@@ -5,20 +5,9 @@ use aws_credential_types::Credentials;
 use aws_sdk_lambda::config::Region;
 use aws_sdk_lambda::Client;
 use aws_smithy_http_client::{tls, Builder as HttpBuilder};
+use map_lambda_protocol::MAX_HTTP_CLIENTS;
 use std::borrow::Cow;
 use tokio::sync::OnceCell;
-
-/// How many invocations to put through one HTTP/2 connection.
-const STREAMS_PER_CONNECTION: usize = 100;
-
-/// The most invocations one coordinator will carry at once.
-///
-/// Keep MAX_IN_FLIGHT_PER_COORDINATOR in map_lambda/coordinator.py in
-/// step with this.
-const MAX_IN_FLIGHT: usize = 1_600;
-
-/// Clients built at cold start, enough to cover `MAX_IN_FLIGHT`.
-const MAX_HTTP_CLIENTS: usize = MAX_IN_FLIGHT.div_ceil(STREAMS_PER_CONNECTION);
 
 /// One set per execution environment, so a warm environment reuses
 /// their connection pools.
@@ -57,7 +46,7 @@ async fn clients() -> &'static [Client] {
 /// One throwaway client aimed at a local `cargo lambda watch`.
 ///
 /// The emulator does not check credentials, but the SDK will not sign
-/// without them. Matches `lambda_client` in map_lambda/client.py.
+/// without them.
 async fn local_client(endpoint_url: &str) -> Client {
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(Region::new("us-east-1"))
@@ -84,43 +73,5 @@ pub(crate) async fn for_request(
             let cold = CLIENTS.get().is_none();
             (Cow::Borrowed(clients().await), Some(cold))
         }
-    }
-}
-
-/// How many connections `concurrency` invocations need.
-pub(crate) fn connections_for(concurrency: usize) -> usize {
-    concurrency
-        .div_ceil(STREAMS_PER_CONNECTION)
-        .clamp(1, MAX_HTTP_CLIENTS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{connections_for, MAX_HTTP_CLIENTS, MAX_IN_FLIGHT, STREAMS_PER_CONNECTION};
-
-    #[test]
-    fn connections_cover_the_concurrency_asked_for() {
-        // Too few connections does not error; the run is just slower.
-        for concurrency in [1usize, 99, 100, 101, 128, 900, MAX_IN_FLIGHT] {
-            let n = connections_for(concurrency);
-            assert!(
-                n * STREAMS_PER_CONNECTION >= concurrency,
-                "{concurrency} in flight over {n} connection(s)"
-            );
-            assert!((1..=MAX_HTTP_CLIENTS).contains(&n));
-        }
-    }
-
-    #[test]
-    fn the_clients_built_cover_the_in_flight_limit() {
-        // `div_ceil` guarantees the arithmetic; this is the clamp.
-        assert_eq!(connections_for(MAX_IN_FLIGHT), MAX_HTTP_CLIENTS);
-    }
-
-    #[test]
-    fn one_connection_is_enough_below_the_stream_limit() {
-        assert_eq!(connections_for(1), 1);
-        assert_eq!(connections_for(STREAMS_PER_CONNECTION), 1);
-        assert_eq!(connections_for(STREAMS_PER_CONNECTION + 1), 2);
     }
 }

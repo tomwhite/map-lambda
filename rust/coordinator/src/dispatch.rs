@@ -4,9 +4,8 @@
 //! Knows nothing about response streaming: reports go out through
 //! `ReportCallback`, so a test can record the frames instead.
 
-use crate::clients::connections_for;
 use crate::invoke::{invoke_with_retries, payload_for};
-use crate::protocol::{Completed, Request, Response};
+use crate::protocol::{connections_for, Completed, Request, Response};
 use crate::tally::{Return, Tally};
 use aws_sdk_lambda::Client;
 use futures::stream::StreamExt;

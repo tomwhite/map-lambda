@@ -4,7 +4,7 @@ Dispatching work through coordinator lambdas: the client half.
 Python invokes N `coordinator` lambdas, each of which dispatches a
 partition of the inputs from inside AWS and streams back
 completed frames, then one result frame. The wire contract is
-rust/coordinator/src/protocol.rs.
+rust/protocol/src/lib.rs.
 """
 
 import contextlib
@@ -20,7 +20,7 @@ import aiostream
 class Answer(TypedDict):
     """
     One invocation's answer, from a completed frame (`Output` in
-    rust/coordinator/src/protocol.rs).
+    rust/protocol/src/lib.rs).
 
     `index` is the position in the caller's `inputs`, converted from
     partition-local by `stream_partition`. `response` is the worker's
@@ -35,7 +35,7 @@ class Answer(TypedDict):
 class Completed:
     """
     One `Completed` frame (`Completed` in
-    rust/coordinator/src/protocol.rs): what one partition finished since
+    rust/protocol/src/lib.rs): what one partition finished since
     its last frame.
     """
 
@@ -65,10 +65,10 @@ MAX_STREAMS_PER_CONNECTION = 128
 
 # What a coordinator actually puts through one connection: the limit above, less
 # headroom. Keep in step with STREAMS_PER_CONNECTION in
-# rust/coordinator/src/clients.rs.
+# rust/protocol/src/lib.rs.
 STREAMS_PER_CONNECTION = 100
 
-# MAX_IN_FLIGHT in rust/coordinator/src/clients.rs, which sizes a coordinator's
+# MAX_IN_FLIGHT in rust/protocol/src/lib.rs, which sizes a coordinator's
 # clients from it. Keep the two in step.
 MAX_IN_FLIGHT_PER_COORDINATOR = 1_600
 
@@ -96,7 +96,7 @@ def connections_for(concurrency: int) -> int:
     How many HTTP/2 connections a coordinator opens to hold `concurrency`
     in flight.
 
-    Mirrors `connections_for` in rust/coordinator/src/clients.rs, which is the
+    Mirrors `connections_for` in rust/protocol/src/lib.rs, which is the
     one that actually decides: this is here so a fake coordinator can
     report what a real one would.
     """
@@ -225,7 +225,7 @@ def check(response: dict[str, Any], expected: int, in_flight: int, counted: int)
             f"{response.get('connections')} connection(s), carrying {capacity} "
             f"streams, but was asked for {in_flight} in flight - it would queue the "
             f"rest and the run would just be slow. Raise MAX_IN_FLIGHT in "
-            f"rust/coordinator/src/clients.rs, or use more coordinators"
+            f"rust/protocol/src/lib.rs, or use more coordinators"
         )
 
 
