@@ -159,6 +159,17 @@ def test_a_coordinator_record_per_partition_is_stamped_with_its_call():
     assert len({r["call"] for r in collected}) == 1
 
 
+def test_every_partitions_record_is_kept_when_one_of_them_fails():
+    """A losing run is when the records are most wanted."""
+    client = RecordingClient([coordinator_result(5, dispatched=6), coordinator_result(5)])
+    collected: list[dict] = []
+
+    with pytest.raises(RuntimeError, match="did not arrive intact"):
+        _map(client, coordinator_stats=collected)
+
+    assert len(collected) == 2
+
+
 def test_a_coordinator_record_does_not_carry_its_partitions_invocations():
     """
     They come back through `invocation_stats`, numbered against the

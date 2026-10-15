@@ -446,8 +446,10 @@ async def stream(
             if batch.outputs:
                 yield batch.outputs
 
+    if coordinator_stats is not None:
+        for response, *_ in settled:
+            coordinator_stats.append({**response, "call": call, "call_start": created})
+
     # Last, so that a losing run has already yielded what did come back.
     for response, expected, in_flight, counted in settled:
         check(response, expected, in_flight, counted)
-        if coordinator_stats is not None:
-            coordinator_stats.append({**response, "call": call, "call_start": created})
