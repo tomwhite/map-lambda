@@ -291,13 +291,14 @@ def test_auto_sizes_the_session_and_an_explicit_count_still_wins():
     assert len(client.payloads) == 2
 
 
-def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching():
+@pytest.mark.parametrize("constant_args", [[("prefix", "p")], []])
+def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching(constant_args):
     """
     The coordinator reads them as the worker's payload template, so
     anything else fails inside AWS with every invocation already billed
     for. The annotation says `dict` and mypy agrees, which is why the
     call below has to be hidden from it - the guard is for callers built
-    at runtime, where nothing checked.
+    at runtime, where nothing checked. An empty one is no exception.
     """
     client = RecordingClient([coordinator_result(10)])
     lambdas = _session(client, coordinators=1)
@@ -308,7 +309,7 @@ def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching():
                 "worker",
                 [1, 2],
                 input_key="i",
-                constant_args=[("prefix", "p")],  # type: ignore[arg-type]
+                constant_args=constant_args,
             )
         )
 

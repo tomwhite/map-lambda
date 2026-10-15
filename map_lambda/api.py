@@ -30,7 +30,7 @@ class Lambdas:
     """
     The number of coordinators the inputs are partitioned across.
 
-    `"auto"` uses the fewest number of coordinators that respects AWS Lmabda
+    `"auto"` uses the fewest number of coordinators that respects AWS Lambda
     limits.
     """
 
@@ -175,7 +175,7 @@ class Lambdas:
         batches = coordinator.stream(
             client,
             inputs,
-            constant_args=constant_args or {},
+            constant_args={} if constant_args is None else constant_args,
             coordinator_function=coordinator.DEFAULT_COORDINATOR_FUNCTION,
             target_function=function_name,
             input_key=input_key,
