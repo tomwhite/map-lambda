@@ -11,43 +11,17 @@ import pytest
 
 from map_lambda import DEFAULT_CONCURRENCY, coordinator
 
-from .fakes import completed, coordinator_body, coordinator_stream
+from .fakes import (
+    RecordingClient,
+    completed,
+    coordinator_body,
+    coordinator_result,
+    coordinator_stream,
+)
 
 
-class RecordingClient:
-    """A Lambda client that records payloads and replays canned responses.
-
-    Each canned response is either a result dict - streamed as a prelude
-    and one result frame, which is the minimum a coordinator can send -
-    or a list of frames to stream in order.
-    """
-
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.payloads: list[dict] = []
-
-    async def invoke_with_response_stream(self, *, FunctionName, Payload):
-        self.payloads.append(json.loads(Payload))
-        canned = self.responses.pop(0)
-        frames = canned if isinstance(canned, list) else [{"Result": canned}]
-        return {"EventStream": coordinator_stream([coordinator_body(*frames)])}
-
-
-def _response(succeeded, stats=(), **kwargs):
-    return {
-        "req_id": "coord-0",
-        "dispatched": succeeded,
-        "succeeded": succeeded,
-        "function_errors": 0,
-        "transport_errors": 0,
-        "retried": 0,
-        "first_error": None,
-        "cold": False,
-        "connections": 1,
-        "elapsed_ms": 1.0,
-        "stats": list(stats),
-        **kwargs,
-    }
+def _response(succeeded, **overrides):
+    return coordinator.Response(**coordinator_result(succeeded, **overrides))
 
 
 def test_partitions_are_strided_not_contiguous():
@@ -232,7 +206,7 @@ def _partition(client, **kwargs):
     reported once its result arrived.
     """
     frames: list[coordinator.Completed] = []
-    reported: list[tuple[dict, int]] = []
+    reported: list[tuple[coordinator.Response, int]] = []
 
     async def go():
         async for batch in coordinator.stream_partition(
@@ -261,6 +235,15 @@ def test_an_unknown_frame_kind_raises_rather_than_being_ignored():
         _partition(client)
 
 
+def test_a_result_frame_missing_a_field_raises_rather_than_reading_as_zero():
+    """A rename on the coordinator's side would otherwise pass `check` quietly."""
+    result = coordinator_result(4)
+    del result["function_errors"]
+    client = RecordingClient([[completed(done=4), {"Result": result}]])
+    with pytest.raises(TypeError, match="function_errors"):
+        _partition(client)
+
+
 def test_every_frame_is_yielded_as_it_arrives_and_the_result_reported():
     """
     Including the empty one opening the stream, and the total reported
@@ -271,7 +254,7 @@ def test_every_frame_is_yielded_as_it_arrives_and_the_result_reported():
             [
                 completed(),
                 completed(done=3),
-                {"Result": _response(5)},
+                {"Result": coordinator_result(5)},
             ]
         ]
     )
@@ -279,8 +262,7 @@ def test_every_frame_is_yielded_as_it_arrives_and_the_result_reported():
     frames, reported = _partition(client)
 
     assert [c.done for c in frames] == [0, 3]
-    # The body verbatim: it goes on to be a coordinator_stats record, so
-    # the tag must not travel with it and no field may be lost.
+    # Every field and no tag: it goes on to be a coordinator_stats record.
     assert reported == [(_response(5), 3)]
 
 
@@ -298,7 +280,7 @@ def test_the_answers_and_records_on_a_frame_come_through_together():
                     stats=[{"index": 0, "req_id": "w-1"}],
                 ),
                 completed(done=1, outputs=[{"index": 1, "response": {"chunks": 2}}]),
-                {"Result": _response(2)},
+                {"Result": coordinator_result(2)},
             ]
         ]
     )
