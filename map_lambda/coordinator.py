@@ -91,18 +91,6 @@ def coordinators_for(concurrency: int, *, local: bool = False) -> int:
     return max(1, -(-concurrency // carries))
 
 
-def connections_for(concurrency: int) -> int:
-    """
-    How many HTTP/2 connections a coordinator opens to hold `concurrency`
-    in flight.
-
-    Mirrors `connections_for` in rust/protocol/src/lib.rs, which is the
-    one that actually decides: this is here so a fake coordinator can
-    report what a real one would.
-    """
-    return max(1, -(-concurrency // STREAMS_PER_CONNECTION))
-
-
 def partition(inputs: list[Any], index: int, count: int) -> list[Any]:
     """
     The slice of `inputs` coordinator `index` of `count` is responsible

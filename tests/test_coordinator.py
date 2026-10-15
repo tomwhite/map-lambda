@@ -10,7 +10,8 @@ import json
 import pytest
 
 from map_lambda import DEFAULT_CONCURRENCY, coordinator
-from map_lambda.testing import completed, coordinator_body, coordinator_stream
+
+from .fakes import completed, coordinator_body, coordinator_stream
 
 
 class RecordingClient:
