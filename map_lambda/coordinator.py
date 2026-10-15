@@ -278,7 +278,8 @@ async def stream_partition(
     function_name: str,
     payload: str,
     outcome: Outcome,
-    positions: list[int] | None = None,
+    partition: int = 0,
+    count: int = 1,
 ) -> AsyncGenerator[Completed, None]:
     """
     Invoke one coordinator and yield each of its frames as it arrives,
@@ -287,8 +288,8 @@ async def stream_partition(
     A frame counts only this partition's own work, and counts what
     happened since the one before it, so the total kept here is the
     partition's own - which is what `check` holds its result against.
-    `positions[j]` is where the partition's *j*-th input sat in the
-    caller's `inputs`; only tests asserting on raw frames omit it.
+    The partition is number `partition` of `count`, which is how its own
+    numbering is read back as an index into the caller's `inputs`.
 
     **A stream that ends without a result frame raises**: the
     coordinator stopped partway, leaving work undone and unreported.
@@ -305,11 +306,9 @@ async def stream_partition(
         async for frame in arriving:
             kind, body = frame.popitem()
             if kind == "Completed":
-                if positions is not None:
-                    # Answers and records are numbered the same way, and
-                    # both leave here numbered against the caller's inputs.
-                    for entry in (*body["outputs"], *body["stats"]):
-                        entry["index"] = positions[entry["index"]]
+                # Partition k holds inputs[k::count].
+                for entry in (*body["outputs"], *body["stats"]):
+                    entry["index"] = partition + entry["index"] * count
                 batch = Completed(**body)
                 # Before yielding: a failure is terminal, so the call
                 # cannot succeed and this frame's answers are moot.
@@ -377,10 +376,6 @@ async def stream(
     if not isinstance(constant_args, dict):
         raise TypeError(f"constant_args must be a dict, not {type(constant_args).__name__}")
     partitions = [partition(inputs, index, coordinators) for index in range(coordinators)]
-    # Partitioned the same way, to read a coordinator's 0-based numbering back
-    # as an index into `inputs`.
-    places = list(range(len(inputs)))
-    positions = [partition(places, index, coordinators) for index in range(coordinators)]
     return_stats = invocation_stats is not None
     created = time.time()
     shares = split(concurrency, coordinators, local=endpoint_url is not None)
@@ -422,10 +417,15 @@ async def stream(
 
     partition_streams = [
         stream_partition(
-            client, coordinator_function, payload, outcome_for(len(group), share), place
+            client,
+            coordinator_function,
+            payload,
+            outcome_for(len(group), share),
+            index,
+            coordinators,
         )
-        for payload, group, share, place in zip(
-            payloads, partitions, shares, positions, strict=True
+        for index, (payload, group, share) in enumerate(
+            zip(payloads, partitions, shares, strict=True)
         )
     ]
 
