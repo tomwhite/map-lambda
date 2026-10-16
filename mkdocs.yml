@@ -11,13 +11,15 @@ nav:
   - Deployment: deployment.md
   - Development: development.md
   - API reference: api.md
+  - Blog:
+      - blog/index.md
 
 theme:
   name: material
   features:
     - content.code.copy
     - navigation.footer
-    - navigation.sections
+    - navigation.indexes
     - toc.follow
   palette:
     - media: "(prefers-color-scheme: light)"
@@ -44,6 +46,7 @@ markdown_extensions:
 
 plugins:
   - search
+  - blog
   - mkdocstrings:
       handlers:
         python:
