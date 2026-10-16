@@ -1,10 +1,11 @@
 # Map-lambda
 
+<!-- --8<-- [start:intro] -->
 A highly-scalable parallel Python map function running on Rust AWS lambdas.
 
 The framework imposes very little overhead for latency:
 
-> **1000 workers launch, run and return outputs in ~1s cold and ~0.5s warm** (for a [no-op worker](./benchmarks/echo_latency.py))
+> **1000 workers launch, run and return outputs in ~1s cold and ~0.5s warm** (for a [no-op worker](https://github.com/tomwhite/map-lambda/blob/main/benchmarks/echo_latency.py))
 
 While also being ideal for data-intensive applications:
 
@@ -20,16 +21,22 @@ Having coordinators run in AWS removes the need for the client to manage a large
 
 There is no persistent state for coordination - everything flows through the lambda functions. As a result the system can scale to a thousand workers in ~1s.
 
-<img src="./map-lambda-architecture.svg">
+<!-- --8<-- [end:intro] -->
 
+<img src="./docs/map-lambda-architecture.svg">
+
+<!-- --8<-- [start:design] -->
 ## Design
 
 - **AWS only**. The implementation is deliberately targetted only at AWS Lambda and not other serverless function platforms, which avoids lowest-common denominator effects, and makes it easy to build on existing projects like [Cargo Lambda](https://www.cargo-lambda.info/). Knowledge of the limits in AWS Lambda (like number of concurrent lambdas, scaling rate, etc) can be built directly into the implementation.
 - **Rust on the backend, Python on the frontend**. Taking advantage of Rust's high-performance and small binary size for AWS Lambdas means that cold start time is low (tens of milliseconds), while offering a Python API to make it easy to integrate in data processing applications.
 - **Execution not storage**. Most map-lambda applications will process data on S3, however this is not a part of the library so it is up to applications to make sure the lambda is deployed in the same AWS region, manage S3 request rates, etc. 
 
+<!-- --8<-- [end:design] -->
+
 ## Using it
 
+<!-- --8<-- [start:using] -->
 The `map_lambda` Python module provides a small API for running map functions. The following shows a simple example map for squaring integers.
 
 ```python
@@ -103,8 +110,11 @@ What is not guaranteed by the framework.
 - **Cancellation**. There is no cancellation mechanism, so once lambdas have started they will continue running in AWS. This can happen if the client fails or any of the connections to the coordinators fail.
 - **Payload validation**. It is up to the user to ensure that the deployed lambda function matches the Python frontend. A mismatch will be treated as a deserialisation error in the worker for each invocation.
 
+<!-- --8<-- [end:using] -->
+
 ## Deployment
 
+<!-- --8<-- [start:deployment] -->
 There are two functions to deploy: your worker, and the coordinator from this repo. Each is an ordinary Lambda, deployed with [cargo lambda](https://www.cargo-lambda.info/). The examples below deploy `echo` - a simple function that returns its input - substitute your own worker's crate name.
 
 ### 1. IAM roles
@@ -164,8 +174,11 @@ for role in map-lambda-worker-role map-lambda-coordinator-role; do
 done
 ```
 
+<!-- --8<-- [end:deployment] -->
+
 ## Building and testing map-lambda
 
+<!-- --8<-- [start:development] -->
 In the `rust/` directory:
 
 `cargo lambda build`
@@ -186,6 +199,8 @@ curl -X POST \
   http://localhost:9000/2015-03-31/functions/echo/invocations \
   -d '{"path":"/tmp/map-lambda-echo","i":1,"timing_map":{},"default_sleep":0.0}'
 ```
+
+<!-- --8<-- [end:development] -->
 
 ## AI usage
 

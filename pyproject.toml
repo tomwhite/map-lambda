@@ -70,3 +70,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.5",
 ]
+docs = [
+    "mkdocstrings-python>=2.0.9",
+    "zensical>=0.0.70",
+]

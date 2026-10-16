@@ -22,7 +22,8 @@ class Lambdas:
     endpoint_url: str | None = None
     """
     `None` uses AWS with credentials and region picked up from the local
-    environment; `LOCAL_ENDPOINT_URL` uses a local cargo lambda watch instead.
+    environment; [`LOCAL_ENDPOINT_URL`][map_lambda.LOCAL_ENDPOINT_URL] uses a local cargo
+    lambda watch instead.
     """
 
     coordinators: int | Literal["auto"] = "auto"
@@ -70,7 +71,8 @@ class Lambdas:
       local run, which has no shared client set to build
     * `connections` - HTTP/2 connections the invocations were spread over
     * `elapsed_ms` - how long the partition took
-    * `call` - which `map_unordered` or `for_each` of the session this was
+    * `call` - which [`map_unordered`][map_lambda.Lambdas.map_unordered] or
+      [`for_each`][map_lambda.Lambdas.for_each] of the session this was
     * `call_start` - when that call began, as epoch seconds
     """
 
@@ -83,7 +85,7 @@ class Lambdas:
     * `req_id` - AWS's id for the worker invocation, for joining to CloudWatch.
       Empty against `cargo lambda watch`, which assigns none
     * `invoke_start`, `invoke_end` - epoch seconds, spanning every attempt
-    * `call`, `call_start` - as in `coordinator_stats`
+    * `call`, `call_start` - as in [`coordinator_stats`][map_lambda.Lambdas.coordinator_stats]
     """
 
     _calls: int = field(default=0, init=False, repr=False)
@@ -129,7 +131,7 @@ class Lambdas:
         """
         Invoke `function_name` once per value of `inputs`, yielding
         `(index, return value)` as each answer comes back. If return
-        values are not needed, use `for_each`.
+        values are not needed, use [`for_each`][map_lambda.Lambdas.for_each].
 
         Each worker's payload is a dict with the input value
         under `input_key`, plus a copy of `constant_args` (if supplied).
@@ -205,10 +207,11 @@ class Lambdas:
     ) -> None:
         """
         Invoke `function_name` once for each value of `inputs`. This is
-        the same as `map_unordered` except nothing is returned, and it
+        the same as [`map_unordered`][map_lambda.Lambdas.map_unordered] except nothing is
+        returned, and it
         waits for the whole run.
 
-        Refer to `map_unordered` for argument definitions.
+        Refer to [`map_unordered`][map_lambda.Lambdas.map_unordered] for argument definitions.
         """
         stream = self._stream(
             self._require_client(),
@@ -229,7 +232,8 @@ class Lambdas:
 
         Useful for "fire and forget" semantics, where failing after submission
         and not learning about the failure is acceptable - failing to submit
-        raises. For a synchronous one-off, use `for_each` with a single input.
+        raises. For a synchronous one-off, use
+        [`for_each`][map_lambda.Lambdas.for_each] with a single input.
         """
         await self._require_client().invoke(
             FunctionName=function_name,
@@ -256,12 +260,13 @@ async def map_unordered(
     """
     Invoke `function_name` once per value of `inputs`, yielding
     `(index, return value)` as each answer comes back. If return values
-    are not needed, use `for_each`.
+    are not needed, use [`for_each`][map_lambda.for_each].
 
-    Refer to `Lambdas.map_unordered` for argument definitions.
+    Refer to [`Lambdas.map_unordered`][map_lambda.Lambdas.map_unordered] for argument
+    definitions.
 
     `endpoint_url` onwards are the dispatch settings documented on
-    `Lambdas`, applied to a session opened for this call alone - which
+    [`Lambdas`][map_lambda.Lambdas], applied to a session opened for this call alone - which
     closes when the iterator does, so stopping early still shuts the
     client down.
 
@@ -303,9 +308,10 @@ async def for_each(
 ) -> None:
     """
     Invoke `function_name` once for each value of `inputs`. This is
-    the same as `map_unordered` except nothing is returned.
+    the same as [`map_unordered`][map_lambda.map_unordered] except nothing is returned.
 
-    Refer to `Lambdas.map_unordered` for argument definitions.
+    Refer to [`Lambdas.map_unordered`][map_lambda.Lambdas.map_unordered] for argument
+    definitions.
     """
     async with Lambdas(
         endpoint_url=endpoint_url,
