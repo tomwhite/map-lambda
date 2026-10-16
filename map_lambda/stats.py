@@ -2,18 +2,21 @@
 What a run recorded about itself, and how to render it.
 
 Two kinds of record, one per level, each collected only when a caller
-passes `Lambdas` a list:
+passes [`Lambdas`][map_lambda.Lambdas] a list:
 
-* `coordinator_stats` - one per coordinator invocation, i.e. per partition
-  per call. `summarize_coordinators` renders them.
-* `invocation_stats` - one per worker invocation, built by the
-  coordinator only when asked (`return_stats`), and arriving on the
-  frames as the run goes. `summarize_invocations` renders them.
+* [`coordinator_stats`][map_lambda.Lambdas.coordinator_stats] - one per
+  coordinator invocation, i.e. per partition per call.
+  [`summarize_coordinators`][map_lambda.stats.summarize_coordinators] renders them.
+* [`invocation_stats`][map_lambda.Lambdas.invocation_stats] - one per worker
+  invocation, built by the coordinator only when asked (`return_stats`), and
+  arriving on the frames as the run goes.
+  [`summarize_invocations`][map_lambda.stats.summarize_invocations] renders them.
 
-Every record carries `call`, the 0-based index of the `Lambdas.map` it
-came from, and `call_start`, `time.time()` when that call began. Records
-group by `call` because it is an index: two calls that read the same
-clock value would merge on a timestamp.
+Every record carries `call`, the 0-based index of the
+[`map_unordered`][map_lambda.Lambdas.map_unordered] or
+[`for_each`][map_lambda.Lambdas.for_each] call it came from, and `call_start`,
+`time.time()` when that call began. Records group by `call` because it is an
+index: two calls that read the same clock value would merge on a timestamp.
 
 An invocation's duration is time queued for a connection, plus the
 round trip, plus execution.
@@ -111,7 +114,7 @@ def write_jsonl(stats: list[Stats], path: str | Path) -> None:
 
 
 def read_jsonl(path: str | Path) -> list[Stats]:
-    """Read back what `write_jsonl` wrote."""
+    """Read back what [`write_jsonl`][map_lambda.stats.write_jsonl] wrote."""
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
 
