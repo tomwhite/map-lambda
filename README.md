@@ -23,7 +23,7 @@ There is no persistent state for coordination - everything flows through the lam
 
 <!-- --8<-- [end:intro] -->
 
-<img src="./docs/map-lambda-architecture.svg">
+<img src="./docs/assets/map-lambda-architecture.svg">
 
 <!-- --8<-- [start:design] -->
 ## Design
