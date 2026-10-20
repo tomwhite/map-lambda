@@ -27,6 +27,10 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
       - run: uv sync --locked
       - run: uv run pytest
 
@@ -38,6 +42,10 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -79,7 +87,7 @@ jobs:
       # `watch` compiles each function on its first request, and the tests
       # fail on a read timeout rather than waiting - so pay for the build
       # here, where nothing is on the clock.
-      - run: cargo build --locked
+      - run: cargo build --locked -p map-lambda-coordinator -p echo
         working-directory: rust
 
       - name: Serve the lambdas
@@ -101,7 +109,7 @@ jobs:
           cat "$RUNNER_TEMP/watch.log"
           exit 1
 
-      - run: uv run pytest -m 'lambda_integration and not real_lambda'
+      - run: uv run pytest -m lambda_integration
 
       - name: Stop the lambdas
         if: always()

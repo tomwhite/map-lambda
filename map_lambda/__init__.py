@@ -32,8 +32,7 @@ The public API also includes utilities for analysing stats for a run:
 * `timeline.generate_timeline` - a chart of a run from invocation stats.
 """
 
-from .api import Lambdas, for_each, map_unordered
-from .client import DEFAULT_CONCURRENCY, LOCAL_ENDPOINT_URL
+from .api import DEFAULT_CONCURRENCY, LOCAL_ENDPOINT_URL, Lambdas, for_each, map_unordered
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
