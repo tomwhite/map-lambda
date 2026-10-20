@@ -60,7 +60,7 @@ def test_a_real_coordinator_sends_every_field_this_side_reads(tmp_path):
     The one check that spans both languages.
 
     Field names are strings at both ends and nothing compares them:
-    `rust/coordinator/src/protocol.rs` writes them, and `coordinator.py`,
+    `rust/protocol/src/lib.rs` writes them, and `coordinator.py`,
     `api.py` and `stats.py` read them back by hand. A rename on either
     side parses fine and goes missing quietly, so the sets are pinned
     against a coordinator that really ran.
