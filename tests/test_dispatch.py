@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 
 from map_lambda import Lambdas, coordinator
-from map_lambda.testing import RecordingClient, completed, coordinator_result
 
+from .fakes import RecordingClient, completed, coordinator_result
 from .utils import drain
 
 
@@ -159,6 +159,17 @@ def test_a_coordinator_record_per_partition_is_stamped_with_its_call():
     assert len({r["call"] for r in collected}) == 1
 
 
+def test_every_partitions_record_is_kept_when_one_of_them_fails():
+    """A losing run is when the records are most wanted."""
+    client = RecordingClient([coordinator_result(5, dispatched=6), coordinator_result(5)])
+    collected: list[dict] = []
+
+    with pytest.raises(RuntimeError, match="did not arrive intact"):
+        _map(client, coordinator_stats=collected)
+
+    assert len(collected) == 2
+
+
 def test_a_coordinator_record_does_not_carry_its_partitions_invocations():
     """
     They come back through `invocation_stats`, numbered against the
@@ -238,19 +249,20 @@ def test_a_partitions_own_numbering_is_read_back_as_a_place_in_the_callers_input
 
 
 def test_equal_inputs_are_still_told_apart_by_index():
-    from map_lambda.testing import session
-
-    records: list[dict] = []
-    lambdas = session(
-        lambda payload: {"seen": payload["i"]}, coordinators=1, invocation_stats=records
+    """Each answer's place comes from its frame, not from matching inputs."""
+    sent = [{"index": i, "response": {"seen": 7}} for i in range(3)]
+    records = [
+        {"index": i, "req_id": f"w-{i}", "invoke_start": 1.0, "invoke_end": 2.0} for i in range(3)
+    ]
+    client = RecordingClient(
+        [[completed(done=3, outputs=sent, stats=records), {"Result": coordinator_result(3)}]]
     )
+    collected: list[dict] = []
 
-    answers = drain(lambdas.map_unordered("worker", [7, 7, 7], input_key="i"))
+    answers = _map(client, [7, 7, 7], coordinators=1, invocation_stats=collected)
 
-    # the answers are indistinguishable; the indices are what tell them apart
-    assert all(answer == {"seen": 7} for _, answer in answers)
     assert sorted(index for index, _ in answers) == [0, 1, 2]
-    assert sorted(r["index"] for r in records) == [0, 1, 2]
+    assert sorted(r["index"] for r in collected) == [0, 1, 2]
 
 
 def test_auto_takes_the_fewest_coordinators_that_hold_the_concurrency():
@@ -280,13 +292,14 @@ def test_auto_sizes_the_session_and_an_explicit_count_still_wins():
     assert len(client.payloads) == 2
 
 
-def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching():
+@pytest.mark.parametrize("constant_args", [[("prefix", "p")], []])
+def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching(constant_args):
     """
     The coordinator reads them as the worker's payload template, so
     anything else fails inside AWS with every invocation already billed
     for. The annotation says `dict` and mypy agrees, which is why the
     call below has to be hidden from it - the guard is for callers built
-    at runtime, where nothing checked.
+    at runtime, where nothing checked. An empty one is no exception.
     """
     client = RecordingClient([coordinator_result(10)])
     lambdas = _session(client, coordinators=1)
@@ -297,7 +310,7 @@ def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching():
                 "worker",
                 [1, 2],
                 input_key="i",
-                constant_args=[("prefix", "p")],  # type: ignore[arg-type]
+                constant_args=constant_args,
             )
         )
 

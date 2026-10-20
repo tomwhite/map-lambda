@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 
 from map_lambda import Lambdas
-from map_lambda.testing import (
+
+from .fakes import (
     RecordingClient,
     completed,
     coordinator_body,
