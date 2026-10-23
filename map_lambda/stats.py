@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .coordinator import MAX_STREAMS_PER_CONNECTION
+from ._native import MAX_STREAMS_PER_CONNECTION
 
 # One record, at either level.
 Stats = dict[str, Any]

@@ -1,9 +1,10 @@
 """
-`coordinator.stream`: the whole client-side path with the invocation
-faked, rather than its pieces one at a time.
+The whole client-side path with the invocation faked: how a call is
+partitioned into requests, what a coordinator's stream is allowed to
+say, and what a client refuses to believe.
 
-`test_coordinator.py` tests the pieces; this is what only shows up when
-they run together.
+The pieces are unit-tested in rust/client; this is what only shows up
+when they run together, behind the Python API.
 """
 
 import asyncio
@@ -11,22 +12,20 @@ from typing import Any
 
 import pytest
 
-from map_lambda import Lambdas, coordinator
+from map_lambda import Lambdas
 
 from .fakes import RecordingClient, completed, coordinator_result
 from .utils import drain
 
 
-def _session(client: RecordingClient, **settings: Any) -> Lambdas:
+def _session(client: Any, **settings: Any) -> Lambdas:
     """A `Lambdas` whose Lambda client answers without invoking anything."""
     lambdas = Lambdas(**{"coordinators": 2, "concurrency": 8, **settings})
     lambdas._client = client
     return lambdas
 
 
-def _map(
-    client: RecordingClient, inputs: list[Any] | None = None, **settings: Any
-) -> list[tuple[int, Any]]:
+def _map(client: Any, inputs: list[Any] | None = None, **settings: Any) -> list[tuple[int, Any]]:
     """
     One `map_unordered` over `inputs` through `client`, drained, with
     nothing else going on.
@@ -161,10 +160,10 @@ def test_a_coordinator_record_per_partition_is_stamped_with_its_call():
 
 def test_every_partitions_record_is_kept_when_one_of_them_fails():
     """A losing run is when the records are most wanted."""
-    client = RecordingClient([coordinator_result(5, dispatched=6), coordinator_result(5)])
+    client = RecordingClient([coordinator_result(4), coordinator_result(5)])
     collected: list[dict] = []
 
-    with pytest.raises(RuntimeError, match="did not arrive intact"):
+    with pytest.raises(RuntimeError, match="completed 4 of 5"):
         _map(client, coordinator_stats=collected)
 
     assert len(collected) == 2
@@ -265,20 +264,10 @@ def test_equal_inputs_are_still_told_apart_by_index():
     assert sorted(r["index"] for r in collected) == [0, 1, 2]
 
 
-def test_auto_takes_the_fewest_coordinators_that_hold_the_concurrency():
-    assert coordinator.coordinators_for(1) == 1
-    assert coordinator.coordinators_for(900) == 1
-    assert coordinator.coordinators_for(coordinator.MAX_IN_FLIGHT_PER_COORDINATOR) == 1
-    assert coordinator.coordinators_for(coordinator.MAX_IN_FLIGHT_PER_COORDINATOR + 1) == 2
-    assert coordinator.coordinators_for(5000) == 4
-    # a local coordinator carries one connection's worth, so it needs more
-    assert coordinator.coordinators_for(500, local=True) == 5
-
-
 def test_auto_sizes_the_session_and_an_explicit_count_still_wins():
     # `coordinator_result` reports one connection, so the concurrency here
-    # stays inside what one of them carries; `coordinators_for` covers the
-    # arithmetic above 1,600.
+    # stays inside what one of them carries; the Rust `coordinators_for`
+    # tests cover the arithmetic above 1,600.
     client = RecordingClient([coordinator_result(10)])
     lambdas = Lambdas(concurrency=100)
     lambdas._client = client

@@ -1,11 +1,17 @@
-import contextlib
 import json
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Self
 
-from . import coordinator
-from .client import DEFAULT_CONCURRENCY, lambda_client
+from . import _native
+
+# Worker invocations in flight per run, split across its coordinators.
+DEFAULT_CONCURRENCY = 100
+
+# A local `cargo lambda watch` server, started from rust/.
+LOCAL_ENDPOINT_URL = _native.LOCAL_ENDPOINT_URL
+
+DEFAULT_COORDINATOR_FUNCTION = "coordinator"
 
 __docformat__ = "google"
 
@@ -90,29 +96,13 @@ class Lambdas:
 
     _calls: int = field(default=0, init=False, repr=False)
     _client: Any = field(default=None, init=False, repr=False)
-    _cm: Any = field(default=None, init=False, repr=False)
-
-    def _partitions(self) -> int:
-        """How many coordinators this session dispatches through."""
-        if self.coordinators == "auto":
-            return coordinator.coordinators_for(
-                self.concurrency, local=self.endpoint_url is not None
-            )
-        return self.coordinators
 
     async def __aenter__(self) -> Self:
-        # One connection per coordinator: the fan-out happens inside AWS.
-        self._cm = lambda_client(
-            self.endpoint_url,
-            max_pool_connections=self._partitions(),
-            read_timeout=coordinator.COORDINATOR_READ_TIMEOUT_SECONDS,
-        )
-        self._client = await self._cm.__aenter__()
+        self._client = await _native.connect(self.endpoint_url)
         return self
 
-    async def __aexit__(self, *exc_info: Any) -> Any:
-        cm, self._cm, self._client = self._cm, None, None
-        return await cm.__aexit__(*exc_info)
+    async def __aexit__(self, *exc_info: Any) -> None:
+        self._client = None
 
     def _require_client(self) -> Any:
         if self._client is None:
@@ -172,29 +162,35 @@ class Lambdas:
         `return_outputs` is false.
         """
         call, self._calls = self._calls, self._calls + 1
-        batches = coordinator.stream(
+        run = _native.dispatch(
             client,
             inputs,
             constant_args={} if constant_args is None else constant_args,
-            coordinator_function=coordinator.DEFAULT_COORDINATOR_FUNCTION,
+            coordinator_function=DEFAULT_COORDINATOR_FUNCTION,
             target_function=function_name,
             input_key=input_key,
-            coordinators=self._partitions(),
+            coordinators=None if self.coordinators == "auto" else self.coordinators,
             concurrency=self.concurrency,
             retries=self.retries,
             endpoint_url=self.endpoint_url,
-            on_done=self.on_progress,
-            coordinator_stats=self.coordinator_stats,
-            invocation_stats=self.invocation_stats,
             return_outputs=return_outputs,
+            return_stats=self.invocation_stats is not None,
             call=call,
         )
-        # Closed explicitly: an async generator has no `yield from`, so a
-        # plain `async for` would leave the cancellation to the interpreter.
-        async with contextlib.aclosing(batches):
-            async for batch in batches:
-                for answer in batch:
-                    yield answer["index"], answer["response"]
+        # Closed explicitly so that stopping early tears the coordinators
+        # down now, rather than whenever `run` is collected.
+        try:
+            async for batch in run:
+                if self.invocation_stats is not None:
+                    self.invocation_stats.extend(batch.invocation_stats)
+                if self.coordinator_stats is not None:
+                    self.coordinator_stats.extend(batch.coordinator_stats)
+                if self.on_progress is not None and batch.done:
+                    self.on_progress(batch.done)
+                for answer in batch.answers:
+                    yield answer
+        finally:
+            run.close()
 
     async def for_each(
         self,
@@ -235,11 +231,7 @@ class Lambdas:
         raises. For a synchronous one-off, use
         [`for_each`][map_lambda.Lambdas.for_each] with a single input.
         """
-        await self._require_client().invoke(
-            FunctionName=function_name,
-            InvocationType="Event",
-            Payload=json.dumps(payload),
-        )
+        await _native.invoke(self._require_client(), function_name, json.dumps(payload))
 
 
 async def map_unordered(

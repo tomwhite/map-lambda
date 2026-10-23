@@ -59,11 +59,10 @@ def test_a_real_coordinator_sends_every_field_this_side_reads(tmp_path):
     """
     The one check that spans both languages.
 
-    Field names are strings at both ends and nothing compares them:
-    `rust/protocol/src/lib.rs` writes them, and `coordinator.py`,
-    `api.py` and `stats.py` read them back by hand. A rename on either
-    side parses fine and goes missing quietly, so the sets are pinned
-    against a coordinator that really ran.
+    Both Rust ends share rust/protocol, but `stats.py`, `timeline.py` and
+    every caller read these records by key, so a rename there parses fine
+    and goes missing quietly. The sets are pinned against a coordinator
+    that really ran.
     """
     _, partitions, records = asyncio.run(
         echo(str(tmp_path), {}, [0], endpoint_url=LOCAL_ENDPOINT_URL)
@@ -127,3 +126,19 @@ def test_echo_failure(tmp_path):
     with pytest.raises(RuntimeError) as excinfo:
         asyncio.run(echo(path, {0: [-0.1]}, [0], endpoint_url=LOCAL_ENDPOINT_URL, retries=0))
     assert "Deliberately fail on invocation number 1 for input 0" in str(excinfo.value)
+
+
+@pytest.mark.lambda_integration
+def test_invoke_runs_the_worker_without_waiting_for_it(tmp_path):
+    async def invoke_and_wait() -> None:
+        async with Lambdas(endpoint_url=LOCAL_ENDPOINT_URL) as lambdas:
+            await lambdas.invoke("echo", path=str(tmp_path), i=0, timing_map={}, default_sleep=0.0)
+        # Returned once submitted, so the worker may not have run yet.
+        for _ in range(100):
+            if (tmp_path / "0").exists():
+                return
+            await asyncio.sleep(0.05)
+
+    asyncio.run(invoke_and_wait())
+
+    check_invocation_counts(tmp_path, {}, 1)
