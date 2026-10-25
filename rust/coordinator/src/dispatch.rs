@@ -201,6 +201,8 @@ mod tests {
             "input_key": "coords",
             "concurrency": 2,
             "retries": 0,
+            "return_stats": true,
+            "return_outputs": true,
         }))
         .expect("a request")
     }

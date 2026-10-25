@@ -4,9 +4,6 @@
 //!
 //! Every type derives both directions, because both ends depend on this
 //! crate.
-//!
-//! The Python client mirrors the limits in map_lambda/coordinator.py:
-//! keep the two in step.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -59,26 +56,14 @@ pub struct Request {
     /// run's total in flight is the sum across coordinators.
     pub concurrency: usize,
     /// Where to send the worker invocations, for a local run against
-    /// `cargo lambda watch`. Absent means real Lambda.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `cargo lambda watch`. `None` means real Lambda.
     pub endpoint_url: Option<String>,
     /// Extra attempts after a *transport* failure, per invocation.
-    #[serde(default = "default_retries")]
     pub retries: usize,
     /// Whether to put one record per invocation on the frames.
-    #[serde(default = "default_true")]
     pub return_stats: bool,
     /// Whether to send the workers' answers back at all.
-    #[serde(default = "default_true")]
     pub return_outputs: bool,
-}
-
-fn default_retries() -> usize {
-    2
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Statistics for a single worker invocation.
@@ -168,8 +153,8 @@ pub enum Frame {
 #[cfg(test)]
 mod tests {
     use super::{
-        connections_for, Completed, Frame, Output, Request, Response, Stat, MAX_HTTP_CLIENTS,
-        MAX_IN_FLIGHT, STREAMS_PER_CONNECTION,
+        connections_for, Completed, Frame, Output, Response, Stat, MAX_HTTP_CLIENTS, MAX_IN_FLIGHT,
+        STREAMS_PER_CONNECTION,
     };
     use serde_json::json;
 
@@ -225,32 +210,6 @@ mod tests {
             value,
             json!({"Completed": {"done": 0, "outputs": [], "stats": [], "first_error": null}})
         );
-    }
-
-    #[test]
-    fn a_request_reads_back_as_the_request_that_was_sent() {
-        let sent = Request {
-            target_function: "echo".to_string(),
-            template: json!({"path": "/tmp/echo"})
-                .as_object()
-                .cloned()
-                .expect("an object"),
-            inputs: vec![json!(0), json!(1)],
-            input_key: "i".to_string(),
-            concurrency: 4,
-            endpoint_url: None,
-            retries: 2,
-            return_stats: true,
-            return_outputs: false,
-        };
-        let line = serde_json::to_string(&sent).expect("serializes");
-
-        let read: Request = serde_json::from_str(&line).expect("round-trips");
-
-        assert_eq!(read.inputs, sent.inputs);
-        assert!(!read.return_outputs);
-        // Absent rather than null: the coordinator reads absent as real Lambda.
-        assert!(!line.contains("endpoint_url"));
     }
 
     #[test]

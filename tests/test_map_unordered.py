@@ -8,7 +8,6 @@ what a run nobody finishes iterating does and does not do.
 """
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -20,6 +19,7 @@ from .fakes import (
     completed,
     coordinator_body,
     coordinator_result,
+    lines,
 )
 
 
@@ -28,48 +28,6 @@ def _session(client: Any, **settings: Any) -> Lambdas:
     lambdas = Lambdas(**{"coordinators": 1, "concurrency": 4, **settings})
     lambdas._client = client
     return lambdas
-
-
-class _GatedClient:
-    """
-    A coordinator that writes its frames in several chunks and waits
-    before each one for the test to release it.
-
-    `RecordingClient` sends everything in a single chunk, which cannot
-    tell an answer that arrived early from one that arrived with the
-    result.
-    """
-
-    def __init__(self, *chunks: list[Any]) -> None:
-        self.chunks = chunks
-        self.gates = [asyncio.Event() for _ in chunks]
-        self.gates[0].set()
-        self.completed = False
-        # An event rather than a flag: the test has to wait for the
-        # teardown to be taken, and `asyncio.run` would tear the stream
-        # down on its way out anyway, after any flag had been read.
-        self.torn_down = asyncio.Event()
-
-    async def invoke_with_response_stream(self, *, FunctionName: str, Payload: str) -> Any:
-        async def events() -> Any:
-            try:
-                for index, frames in enumerate(self.chunks):
-                    await self.gates[index].wait()
-                    # The prelude belongs to the first chunk only.
-                    payload = (
-                        coordinator_body(*frames)
-                        if index == 0
-                        else b"".join(json.dumps(f).encode() + b"\n" for f in frames)
-                    )
-                    yield {"PayloadChunk": {"Payload": payload}}
-                yield {"InvokeComplete": {}}
-                self.completed = True
-            finally:
-                # However the stream ends - closed from above, or the
-                # task cancelled - rather than pinning which.
-                self.torn_down.set()
-
-        return {"EventStream": events()}
 
 
 def _answers(client: Any, inputs: list[Any], **settings: Any) -> list[tuple[int, Any]]:
@@ -110,21 +68,21 @@ def test_every_answer_carries_the_position_of_its_input_across_partitions():
 
 def test_an_answer_reaches_the_caller_before_the_run_has_finished():
     """
-    The coordinator holds its result frame back until the test has been
+    The coordinator's result frame is not written until the test has been
     given the answer, so an implementation that collected first would
     never get here.
     """
-    client = _GatedClient(
-        [completed(done=1, outputs=[{"index": 0, "response": "early"}])],
-        [{"Result": coordinator_result(1)}],
-    )
+    client = RecordingClient()
+    body = client.respond()
+    body.write(coordinator_body(completed(done=1, outputs=[{"index": 0, "response": "early"}])))
 
     async def drain() -> list[tuple[int, Any]]:
         lambdas = _session(client)
         answers = []
         async for answer in lambdas.map_unordered("worker", ["a"], input_key="i"):
             answers.append(answer)
-            client.gates[1].set()
+            body.write(lines({"Result": coordinator_result(1)}))
+            body.close()
         return answers
 
     answers = asyncio.run(asyncio.wait_for(drain(), timeout=5))
@@ -181,24 +139,23 @@ def test_an_input_whose_worker_returned_nothing_is_never_yielded():
 
 
 def test_stopping_early_tears_down_the_coordinators_still_running():
-    client = _GatedClient(
-        [completed(done=1, outputs=[{"index": 0, "response": "first"}])],
-        [completed(done=1), {"Result": coordinator_result(2)}],
-    )
+    client = RecordingClient()
+    body = client.respond()
+    body.write(coordinator_body(completed(done=1, outputs=[{"index": 0, "response": "first"}])))
 
     async def take_one() -> None:
         lambdas = _session(client)
         answers = lambdas.map_unordered("worker", ["a", "b"], input_key="i")
         async for _ in answers:
             break
+        assert not body.closed
         await answers.aclose()
-        await asyncio.wait_for(client.torn_down.wait(), timeout=5)
 
     asyncio.run(take_one())
 
-    # Gate 1 was never opened, so it was still waiting for the rest of
-    # its partition when it was torn down.
-    assert not client.completed
+    # The rest of the partition was never written, so only the client
+    # letting go of the stream can have closed it.
+    assert body.closed
 
 
 def test_an_abandoned_run_raises_nothing_however_it_went():

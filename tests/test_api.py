@@ -4,7 +4,6 @@ The session: what a `Lambdas` sends its coordinators, and what
 """
 
 import asyncio
-import contextlib
 from typing import Any
 
 import pytest
@@ -25,11 +24,10 @@ def _session(client: RecordingClient, **settings: Any) -> api.Lambdas:
 def _dispatching_to(monkeypatch: pytest.MonkeyPatch, client: RecordingClient) -> None:
     """Have every session built from here on use `client`."""
 
-    @contextlib.asynccontextmanager
     async def ready(*args: Any, **kwargs: Any) -> Any:
-        yield client
+        return client
 
-    monkeypatch.setattr(api, "lambda_client", ready)
+    monkeypatch.setattr(api._native, "connect", ready)
 
 
 def _answering(*answers: Any) -> RecordingClient:
@@ -222,10 +220,14 @@ def test_invoke_dispatches_once_without_waiting_for_the_answer():
 
 def test_invoke_raises_when_it_could_not_be_submitted():
     """Submission is the only failure `invoke` can see, so it has to raise."""
-    lambdas = _session(RecordingClient(invoke_error=RuntimeError("no such function")))
 
-    with pytest.raises(RuntimeError, match="no such function"):
-        asyncio.run(lambdas.invoke("delete-scratch", store="s3://bucket/scratch"))
+    async def invoke_nowhere() -> None:
+        # Nothing listens on the discard port, so the connection is refused.
+        async with api.Lambdas(endpoint_url="http://127.0.0.1:9") as lambdas:
+            await lambdas.invoke("delete-scratch", store="s3://bucket/scratch")
+
+    with pytest.raises(RuntimeError, match="could not reach Lambda"):
+        asyncio.run(invoke_nowhere())
 
 
 def test_invoke_without_a_client_says_so_rather_than_failing_later():

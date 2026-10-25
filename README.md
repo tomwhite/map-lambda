@@ -29,7 +29,7 @@ There is no persistent state for coordination - everything flows through the lam
 ## Design
 
 - **AWS only**. The implementation is deliberately targetted only at AWS Lambda and not other serverless function platforms, which avoids lowest-common denominator effects, and makes it easy to build on existing projects like [Cargo Lambda](https://www.cargo-lambda.info/). Knowledge of the limits in AWS Lambda (like number of concurrent lambdas, scaling rate, etc) can be built directly into the implementation.
-- **Rust on the backend, Python on the frontend**. Taking advantage of Rust's high-performance and small binary size for AWS Lambdas means that cold start time is low (tens of milliseconds), while offering a Python API to make it easy to integrate in data processing applications.
+- **Rust on the backend, Python on the frontend**. Taking advantage of Rust's high-performance and small binary size for AWS Lambdas means that cold start time is low (tens of milliseconds), while offering a Python API to make it easy to integrate in data processing applications. The client is Rust too; the Python API is a thin PyO3 binding over it.
 - **Execution not storage**. Most map-lambda applications will process data on S3, however this is not a part of the library so it is up to applications to make sure the lambda is deployed in the same AWS region, manage S3 request rates, etc. 
 
 <!-- --8<-- [end:design] -->
@@ -179,6 +179,10 @@ done
 ## Building and testing map-lambda
 
 <!-- --8<-- [start:development] -->
+The Python package is built with [maturin](https://www.maturin.rs/), so a Rust toolchain is needed to install it from source. `uv sync` builds the extension, and `uv run` rebuilds it whenever the Rust under `rust/` changes.
+
+`uv run pytest` runs the Python tests. The `lambda_integration` ones are deselected by default; run them with `uv run pytest -m lambda_integration` once the local server below is running.
+
 In the `rust/` directory:
 
 `cargo lambda build`
@@ -186,8 +190,6 @@ In the `rust/` directory:
 `cargo test` runs the Rust unit tests for every crate in the workspace.
 
 `cargo lambda watch` runs a local server at `http://localhost:9000` serving *every* lambda crate at once, routed by function name in the URL, rebuilding on file changes.
-
-`uv run pytest` runs the Python unit tests - make sure that the local server is running first.
 
 To invoke a worker manually, use `cargo lambda` or `curl` directly:
 

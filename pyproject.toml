@@ -5,10 +5,7 @@ authors = [
     { name = "Tom White", email = "tom.e.white@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = [
-    "aioboto3>=15.5.0",
-    "aiostream",
-]
+dependencies = []
 
 [project.optional-dependencies]
 diagnostics = [
@@ -16,21 +13,28 @@ diagnostics = [
 ]
 
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
 
-[tool.setuptools.packages.find]
-include = ["map_lambda*"]
+[tool.maturin]
+manifest-path = "rust/python/Cargo.toml"
+module-name = "map_lambda._native"
 
-[tool.setuptools.package-data]
-map_lambda = ["py.typed"]
+[tool.uv]
+# Rebuild the extension when the Rust it is built from changes.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "rust/Cargo.lock" },
+    { file = "rust/client/**/*" },
+    { file = "rust/protocol/**/*" },
+    { file = "rust/python/**/*" },
+]
 
 [tool.pytest.ini_options]
 markers = [
     "lambda_integration: requires a local `cargo lambda watch` server (fails without one, so deselected by default)",
-    "real_lambda: invokes a real deployed AWS Lambda (costs money, needs credentials; opt-in only, see tests/test_client.py)",
 ]
-addopts = "--cov=map_lambda --cov=tests --cov-report=term-missing -m 'not real_lambda and not lambda_integration'"
+addopts = "--cov=map_lambda --cov=tests --cov-report=term-missing -m 'not lambda_integration'"
 
 [tool.ruff]
 line-length = 100
@@ -58,7 +62,7 @@ warn_unused_ignores = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["aioboto3.*", "botocore.*", "matplotlib.*"]
+module = ["matplotlib.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

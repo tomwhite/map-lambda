@@ -7,25 +7,21 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+from map_lambda import _native
+
 # The metadata prelude a deployed coordinator's stream opens with, which
 # the client skips.
 COORDINATOR_PRELUDE = b'{"statusCode":200,"headers":{}}' + b"\x00" * 8
 
 
+def lines(*frames: Any) -> bytes:
+    """Frames as a coordinator writes them, one JSON line each."""
+    return b"".join(json.dumps(f).encode() + b"\n" for f in frames)
+
+
 def coordinator_body(*frames: Any) -> bytes:
-    """The bytes a coordinator writes: a prelude, then one JSON line each."""
-    return COORDINATOR_PRELUDE + b"".join(json.dumps(f).encode() + b"\n" for f in frames)
-
-
-def coordinator_stream(chunks: list[bytes]) -> Any:
-    """An EventStream over raw byte chunks, as aiobotocore yields them."""
-
-    async def events() -> Any:
-        for chunk in chunks:
-            yield {"PayloadChunk": {"Payload": chunk}}
-        yield {"InvokeComplete": {}}
-
-    return events()
+    """A whole response body: the prelude, then the frames."""
+    return COORDINATOR_PRELUDE + lines(*frames)
 
 
 def completed(
@@ -50,12 +46,11 @@ def completed(
 
 def coordinator_result(succeeded: int, **overrides: Any) -> dict[str, Any]:
     """
-    One coordinator's result frame, with every field the client checks.
+    One coordinator's result frame.
 
     `succeeded` sets `dispatched` too, because the ordinary case is a
     partition that did all of its work; `**overrides` is how a test says
-    otherwise - `dispatched=2` for a short partition, `transport_errors=1`
-    for a failed one.
+    otherwise, e.g. `transport_errors=1` for a failed one.
 
     Answers and records are not here: they ride on the `Completed`
     frames, and a result frame repeating them would be a second copy of
@@ -77,7 +72,7 @@ def coordinator_result(succeeded: int, **overrides: Any) -> dict[str, Any]:
     }
 
 
-class RecordingClient:
+class RecordingClient(_native.Stub):
     """
     A Lambda client that records the requests it was sent and replays
     canned responses. Use it to assert **what went on the wire**, and to
@@ -87,39 +82,29 @@ class RecordingClient:
     Each canned response is either a result dict (`coordinator_result`),
     streamed as the frames accounting for its work and then the result,
     or a list of frames to stream verbatim - which is how a test sends a
-    stream that does *not* add up.
+    stream that does *not* add up. For a body written as the test goes,
+    take one from `respond()` instead.
     """
 
-    def __init__(
-        self, responses: Sequence[Any] = (), invoke_error: Exception | None = None
-    ) -> None:
-        self.responses = list(responses)
-        # One per coordinator invocation, i.e. per partition.
-        self.payloads: list[dict] = []
-        # One `(FunctionName, payload)` per `Lambdas.invoke`.
-        self.invoked: list[tuple[str, dict]] = []
-        self.invoke_error = invoke_error
+    def __init__(self, responses: Sequence[Any] = ()) -> None:
+        for canned in responses:
+            if isinstance(canned, list):
+                frames = canned
+            else:
+                frames = [
+                    completed(done=canned["succeeded"], first_error=canned.get("first_error")),
+                    {"Result": canned},
+                ]
+            body = self.respond()
+            body.write(coordinator_body(*frames))
+            body.close()
 
-    async def invoke(self, *, FunctionName: str, InvocationType: str, Payload: str) -> Any:
-        """
-        What `Lambdas.invoke` reaches, recorded rather than sent.
+    @property
+    def payloads(self) -> list[dict]:
+        """One request per coordinator invocation, i.e. per partition."""
+        return [json.loads(request) for request in self.requests]
 
-        `invoke_error` makes it raise instead, as a missing function or
-        a role that may not invoke it would.
-        """
-        if self.invoke_error is not None:
-            raise self.invoke_error
-        self.invoked.append((FunctionName, json.loads(Payload)))
-        return {"StatusCode": 202}
-
-    async def invoke_with_response_stream(self, *, FunctionName: str, Payload: str) -> Any:
-        self.payloads.append(json.loads(Payload))
-        canned = self.responses.pop(0)
-        if isinstance(canned, list):
-            frames = canned
-        else:
-            frames = [
-                completed(done=canned["succeeded"], first_error=canned.get("first_error")),
-                {"Result": canned},
-            ]
-        return {"EventStream": coordinator_stream([coordinator_body(*frames)])}
+    @property
+    def invoked(self) -> list[tuple[str, dict]]:
+        """One `(function, payload)` per `Lambdas.invoke`."""
+        return [(function, json.loads(payload)) for function, payload in self.invocations]

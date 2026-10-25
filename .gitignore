@@ -11,3 +11,4 @@ dist/
 htmlcov/
 rust/target/
 site/
+map_lambda/*.so
