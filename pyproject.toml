@@ -76,5 +76,6 @@ dev = [
 ]
 docs = [
     "mkdocstrings-python>=2.0.9",
+    "ruff>=0.16.5",
     "zensical>=0.0.70",
 ]

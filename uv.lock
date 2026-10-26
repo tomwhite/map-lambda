@@ -616,6 +616,7 @@ dev = [
 ]
 docs = [
     { name = "mkdocstrings-python" },
+    { name = "ruff" },
     { name = "zensical" },
 ]
 
@@ -634,6 +635,7 @@ dev = [
 ]
 docs = [
     { name = "mkdocstrings-python", specifier = ">=2.0.9" },
+    { name = "ruff", specifier = ">=0.16.5" },
     { name = "zensical", specifier = ">=0.0.70" },
 ]
 
