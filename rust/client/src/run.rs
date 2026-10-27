@@ -10,6 +10,7 @@ use futures::stream::{BoxStream, StreamExt};
 use map_lambda_protocol::{Frame, Request, Response, Stat, MAX_REQUEST_BYTES};
 pub use map_lambda_protocol::{Response as DispatcherStats, Stat as InvocationStats};
 use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,8 +45,9 @@ pub(crate) struct Call {
 pub struct Batch {
     /// Invocations that came back successfully.
     pub done: usize,
-    /// `(index into inputs, the worker's answer)`.
-    pub answers: Vec<(usize, Value)>,
+    /// `(index into inputs, the worker's answer)`. Empty for a
+    /// `for_each`, and a worker that answered null has no entry.
+    pub answers: Vec<(usize, Box<RawValue>)>,
     /// One per invocation, if [`Settings::return_stats`](crate::Settings::return_stats).
     pub invocation_stats: Vec<Record<InvocationStats>>,
     /// One per dispatcher, all in the last batch: they arrive before any
