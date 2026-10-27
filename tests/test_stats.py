@@ -6,7 +6,7 @@ Rendering a run's two kinds of record, handed over as literals:
 from map_lambda.stats import (
     max_outstanding,
     read_jsonl,
-    summarize_coordinators,
+    summarize_dispatchers,
     summarize_invocations,
     write_jsonl,
 )
@@ -105,7 +105,7 @@ def test_summarize_counts_retries_against_what_they_absorbed():
         },
     ]
 
-    summary = summarize_coordinators(partitions)
+    summary = summarize_dispatchers(partitions)
 
     assert "2 invocations over 1 call(s), 1 cold" in summary
     assert "1,000 invocations dispatched, 4 retried (0.40%)" in summary
@@ -115,13 +115,13 @@ def test_summarize_counts_retries_against_what_they_absorbed():
 
 def test_summarize_leaves_cold_out_when_nothing_reported_it():
     """
-    A local coordinator has no shared client set to build, so it sends
+    A local dispatcher has no shared client set to build, so it sends
     `cold` as null. "0 cold" would read as a warm deployment rather than
     as a figure nobody measured.
     """
     partitions = [{"call": 0, "dispatched": 3, "cold": None, "elapsed_ms": 1.0, "connections": 1}]
 
-    summary = summarize_coordinators(partitions)
+    summary = summarize_dispatchers(partitions)
 
     assert "1 invocations over 1 call(s)\n" in summary
     assert "cold" not in summary
@@ -139,28 +139,28 @@ def _partition(call=0, connections=1, **fields):
 
 
 def test_summarize_reports_the_connections_a_partition_had():
-    summary = summarize_coordinators([_partition(connections=9)])
+    summary = summarize_dispatchers([_partition(connections=9)])
 
-    assert "9 HTTP/2 connection(s) per coordinator, ~1,152 in flight available" in summary
+    assert "9 HTTP/2 connection(s) per dispatcher, ~1,152 in flight available" in summary
 
 
-def test_the_streams_available_are_the_calls_not_one_coordinators():
-    summary = summarize_coordinators([_partition(connections=2) for _ in range(8)])
+def test_the_streams_available_are_the_calls_not_one_dispatchers():
+    summary = summarize_dispatchers([_partition(connections=2) for _ in range(8)])
 
     assert "~2,048 in flight available" in summary
 
 
-def test_connections_are_a_range_when_the_coordinators_differ():
-    """Saying "2 each" would overstate the coordinator that queues first."""
-    summary = summarize_coordinators([_partition(connections=2), _partition(connections=1)])
+def test_connections_are_a_range_when_the_dispatchers_differ():
+    """Saying "2 each" would overstate the dispatcher that queues first."""
+    summary = summarize_dispatchers([_partition(connections=2), _partition(connections=1)])
 
-    assert "1-2 HTTP/2 connection(s) per coordinator" in summary
+    assert "1-2 HTTP/2 connection(s) per dispatcher" in summary
     assert "~384 in flight available" in summary
 
 
 def test_the_widest_call_is_what_the_connections_have_to_cover():
     """A session's calls need not ask for the same concurrency."""
-    summary = summarize_coordinators(
+    summary = summarize_dispatchers(
         [_partition(call=0, connections=1), _partition(call=1, connections=4)]
     )
 
@@ -175,8 +175,8 @@ def test_summarize_takes_the_worst_spread_across_calls():
         {"call": 2.0, "dispatched": 10, "retried": 0, "elapsed_ms": 6000.0},
     ]
 
-    assert "worst spread within a call 5.0s" in summarize_coordinators(partitions)
+    assert "worst spread within a call 5.0s" in summarize_dispatchers(partitions)
 
 
 def test_summarize_with_nothing_to_say():
-    assert summarize_coordinators([]) == "coordinators: none"
+    assert summarize_dispatchers([]) == "dispatchers: none"

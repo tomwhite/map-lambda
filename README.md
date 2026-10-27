@@ -15,9 +15,9 @@ Note: This library is alpha-quality. The API and its behaviour may change in the
 
 ## How it works
 
-There are two levels of lambdas: a small number of **coordinator** lambdas dispatch to a large number of **worker** lambdas that run a pre-deployed compute function. The map **inputs** are split into **partitions**, and each partition is handled by a coordinator.
+There are two levels of lambdas: a small number of **dispatcher** lambdas fan out to a large number of **worker** lambdas that run a pre-deployed compute function. The map **inputs** are split into **partitions**, and each partition is handled by a dispatcher.
 
-Having coordinators run in AWS removes the need for the client to manage a large number of network connections to the workers. The client still gets progress updates since they are sent periodically by the coordinators over a small number of persistent HTTP connections.
+Having dispatchers run in AWS removes the need for the client to manage a large number of network connections to the workers. The client still gets progress updates since they are sent periodically by the dispatchers over a small number of persistent HTTP connections.
 
 There is no persistent state for coordination - everything flows through the lambda functions. As a result the system can scale to a thousand workers in ~1s.
 
@@ -87,7 +87,7 @@ Inputs and outputs are sent as JSON, so they must be JSON-serialisable (e.g. Pyt
 
 There is also a `for_each` function, which takes exactly the same arguments as `map_unordered` but doesn't return any values. The return type of the Rust `function_handler` in this case should be `Result<(), Error>` to indicate an empty response.
 
-Map-lambda provides **diagnostics** in the form of progress updates as the `map_unordered` (or `for_each`) call runs, coordinator and worker invocation stats at the end of the run, and way to visualise the invocations over time. See the API doc and/or examples for details.
+Map-lambda provides **diagnostics** in the form of progress updates as the `map_unordered` (or `for_each`) call runs, dispatcher and worker invocation stats at the end of the run, and way to visualise the invocations over time. See the API doc and/or examples for details.
 
 ## Failures and retries
 
@@ -100,14 +100,14 @@ The call fails with a `RuntimeError` in any of the following cases:
 - if any invocation fails (a worker error, or a transport error after retrying),
 - if there is a stream error,
 - if the stream does not end with a result frame,
-- or if the coordinator fails.
+- or if the dispatcher fails.
 
 ## Out of scope
 
 What is not guaranteed by the framework.
 
-- **Coordinator retries**. There is no mechanism for retrying coordinators. If a coordinator fails then the call will fail and will need to be re-run by the client.
-- **Cancellation**. There is no cancellation mechanism, so once lambdas have started they will continue running in AWS. This can happen if the client fails or any of the connections to the coordinators fail.
+- **Dispatcher retries**. There is no mechanism for retrying dispatchers. If a dispatcher fails then the call will fail and will need to be re-run by the client.
+- **Cancellation**. There is no cancellation mechanism, so once lambdas have started they will continue running in AWS. This can happen if the client fails or any of the connections to the dispatchers fail.
 - **Payload validation**. It is up to the user to ensure that the deployed lambda function matches the Python frontend. A mismatch will be treated as a deserialisation error in the worker for each invocation.
 
 <!-- --8<-- [end:using] -->
@@ -115,23 +115,23 @@ What is not guaranteed by the framework.
 ## Deployment
 
 <!-- --8<-- [start:deployment] -->
-There are two functions to deploy: your worker, and the coordinator from this repo. Each is an ordinary Lambda, deployed with [cargo lambda](https://www.cargo-lambda.info/). The examples below deploy `echo` - a simple function that returns its input - substitute your own worker's crate name.
+There are two functions to deploy: your worker, and the dispatcher from this repo. Each is an ordinary Lambda, deployed with [cargo lambda](https://www.cargo-lambda.info/). The examples below deploy `echo` - a simple function that returns its input - substitute your own worker's crate name.
 
 ### 1. IAM roles
 
-The worker and the coordinator need different permissions, so they get a role each.
+The worker and the dispatcher need different permissions, so they get a role each.
 
 ```shell
 # Roles Lambda can assume, with permission to write logs
-for role in map-lambda-worker-role map-lambda-coordinator-role; do
+for role in map-lambda-worker-role map-lambda-dispatcher-role; do
   aws iam create-role --role-name $role \
     --assume-role-policy-document file://aws/trust-policy.json >/dev/null
   aws iam attach-role-policy --role-name $role \
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole >/dev/null
 done
 
-# ...and the coordinator may invoke this project's workers
-aws iam put-role-policy --role-name map-lambda-coordinator-role \
+# ...and the dispatcher may invoke this project's workers
+aws iam put-role-policy --role-name map-lambda-dispatcher-role \
   --policy-name invoke-map-lambda-workers \
   --policy-document file://aws/invoke-map-lambda-workers.json >/dev/null
 ```
@@ -142,14 +142,14 @@ A worker that reads or writes S3 needs its own policy on `map-lambda-worker-role
 
 ```shell
 cd rust
-cargo lambda build --release --arm64  # every crate: echo and coordinator
+cargo lambda build --release --arm64  # every crate: echo and dispatcher
 
 # --role takes an ARN rather than a name, so ask IAM for it
 worker_role=$(aws iam get-role --role-name map-lambda-worker-role --query Role.Arn --output text)
-coordinator_role=$(aws iam get-role --role-name map-lambda-coordinator-role --query Role.Arn --output text)
+dispatcher_role=$(aws iam get-role --role-name map-lambda-dispatcher-role --query Role.Arn --output text)
 
 cargo lambda deploy --binary-name echo --role "$worker_role" echo
-cargo lambda deploy --binary-name coordinator --role "$coordinator_role" coordinator
+cargo lambda deploy --binary-name dispatcher --role "$dispatcher_role" dispatcher
 ```
 
 ### 3. Tearing it down
@@ -158,16 +158,16 @@ Delete the logs (which are billed for storage):
 
 ```shell
 aws logs delete-log-group --log-group-name /aws/lambda/echo
-aws logs delete-log-group --log-group-name /aws/lambda/coordinator
+aws logs delete-log-group --log-group-name /aws/lambda/dispatcher
 ```
 
 The functions and roles should only be deleted if you don't need to run them again.
 
 ```shell
 aws lambda delete-function --function-name echo
-aws lambda delete-function --function-name coordinator
+aws lambda delete-function --function-name dispatcher
 
-for role in map-lambda-worker-role map-lambda-coordinator-role; do
+for role in map-lambda-worker-role map-lambda-dispatcher-role; do
   aws iam detach-role-policy --role-name $role \
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
   aws iam delete-role --role-name $role

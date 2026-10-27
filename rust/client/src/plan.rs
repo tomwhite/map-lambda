@@ -1,4 +1,4 @@
-//! How a run is divided: how many coordinators, which inputs each one
+//! How a run is divided: how many dispatchers, which inputs each one
 //! gets, and how much of the concurrency goes with them.
 //!
 //! All of it decided before anything is invoked, so a run that could not
@@ -15,8 +15,8 @@ fn carried(local: bool) -> usize {
     }
 }
 
-/// The fewest coordinators that can hold `concurrency` in flight.
-pub fn coordinators_for(concurrency: usize, local: bool) -> usize {
+/// The fewest dispatchers that can hold `concurrency` in flight.
+pub fn dispatchers_for(concurrency: usize, local: bool) -> usize {
     concurrency.div_ceil(carried(local)).max(1)
 }
 
@@ -35,21 +35,21 @@ pub(crate) fn stride<T>(inputs: Vec<T>, count: usize) -> Vec<Vec<T>> {
 }
 
 /// `concurrency` in flight, split as evenly as possible across `count`
-/// coordinators. Remainders go to the earliest partitions, which are
+/// dispatchers. Remainders go to the earliest partitions, which are
 /// also the ones striding gives an extra input.
 ///
-/// Refuses a share more than one coordinator can carry, which a local
+/// Refuses a share more than one dispatcher can carry, which a local
 /// one can far less of: it would not fail, just queue, and `check` would
 /// only say so once the slow run had happened.
 pub(crate) fn split(concurrency: usize, count: usize, local: bool) -> Result<Vec<usize>, Error> {
     if count == 0 {
-        return Err(Error::NoCoordinators);
+        return Err(Error::NoDispatchers);
     }
     let (base, extra) = (concurrency / count, concurrency % count);
     if base == 0 && extra == 0 {
         return Err(Error::ConcurrencyTooSmall {
             concurrency,
-            coordinators: count,
+            dispatchers: count,
         });
     }
     let carries = carried(local);
@@ -57,11 +57,11 @@ pub(crate) fn split(concurrency: usize, count: usize, local: bool) -> Result<Vec
     if widest > carries {
         return Err(Error::TooMuchInFlight {
             concurrency,
-            coordinators: count,
+            dispatchers: count,
             widest,
             carries,
-            holder: if local { "a local coordinator" } else { "one" },
-            need: coordinators_for(concurrency, local),
+            holder: if local { "a local dispatcher" } else { "one" },
+            need: dispatchers_for(concurrency, local),
         });
     }
     Ok((0..count).map(|i| base + usize::from(i < extra)).collect())
@@ -69,18 +69,18 @@ pub(crate) fn split(concurrency: usize, count: usize, local: bool) -> Result<Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{coordinators_for, split, stride};
+    use super::{dispatchers_for, split, stride};
     use map_lambda_protocol::{MAX_IN_FLIGHT, MAX_IN_FLIGHT_LOCAL};
 
     #[test]
-    fn auto_takes_the_fewest_coordinators_that_hold_the_concurrency() {
-        assert_eq!(coordinators_for(1, false), 1);
-        assert_eq!(coordinators_for(900, false), 1);
-        assert_eq!(coordinators_for(MAX_IN_FLIGHT, false), 1);
-        assert_eq!(coordinators_for(MAX_IN_FLIGHT + 1, false), 2);
-        assert_eq!(coordinators_for(5000, false), 4);
-        // a local coordinator carries one connection's worth, so it needs more
-        assert_eq!(coordinators_for(500, true), 5);
+    fn auto_takes_the_fewest_dispatchers_that_hold_the_concurrency() {
+        assert_eq!(dispatchers_for(1, false), 1);
+        assert_eq!(dispatchers_for(900, false), 1);
+        assert_eq!(dispatchers_for(MAX_IN_FLIGHT, false), 1);
+        assert_eq!(dispatchers_for(MAX_IN_FLIGHT + 1, false), 2);
+        assert_eq!(dispatchers_for(5000, false), 4);
+        // a local dispatcher carries one connection's worth, so it needs more
+        assert_eq!(dispatchers_for(500, true), 5);
     }
 
     #[test]
@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn more_coordinators_than_inputs_leaves_some_with_nothing() {
+    fn more_dispatchers_than_inputs_leaves_some_with_nothing() {
         assert_eq!(stride(vec![0, 1], 5)[2], Vec::<i32>::new());
     }
 
@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(split(4, 4, false).expect("splits"), [1, 1, 1, 1]);
     }
 
-    /// Silently giving a coordinator zero in flight would hang it.
+    /// Silently giving a dispatcher zero in flight would hang it.
     #[test]
     fn a_concurrency_too_small_to_split_is_refused() {
         let refused = split(0, 4, false).expect_err("refused");
@@ -112,15 +112,15 @@ mod tests {
     }
 
     #[test]
-    fn at_least_one_coordinator_is_needed() {
+    fn at_least_one_dispatcher_is_needed() {
         let refused = split(500, 0, false).expect_err("refused");
-        assert!(refused.to_string().contains("at least one coordinator"));
+        assert!(refused.to_string().contains("at least one dispatcher"));
     }
 
     /// The run would work, just several times slower, so nothing else
     /// would report it.
     #[test]
-    fn a_share_no_coordinator_could_carry_is_refused() {
+    fn a_share_no_dispatcher_could_carry_is_refused() {
         assert_eq!(
             split(MAX_IN_FLIGHT, 1, false).expect("fits"),
             [MAX_IN_FLIGHT]
@@ -138,16 +138,16 @@ mod tests {
         let over_there = split(MAX_IN_FLIGHT * 2 + 1, 2, false).expect_err("refused");
         assert!(over_there
             .to_string()
-            .contains("Use at least 3 coordinators"));
+            .contains("Use at least 3 dispatchers"));
     }
 
     #[test]
-    fn a_local_coordinator_carries_one_connections_worth() {
+    fn a_local_dispatcher_carries_one_connections_worth() {
         assert!(split(MAX_IN_FLIGHT_LOCAL, 1, true).is_ok());
         let refused = split(MAX_IN_FLIGHT_LOCAL + 1, 1, true).expect_err("refused");
         assert!(refused
             .to_string()
-            .contains("more than the 100 a local coordinator can carry"));
+            .contains("more than the 100 a local dispatcher can carry"));
         // the same share is fine against real Lambda
         assert!(split(MAX_IN_FLIGHT_LOCAL + 1, 1, false).is_ok());
     }

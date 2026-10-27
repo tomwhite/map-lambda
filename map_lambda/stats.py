@@ -4,11 +4,11 @@ What a run recorded about itself, and how to render it.
 Two kinds of record, one per level, each collected only when a caller
 passes [`Lambdas`][map_lambda.Lambdas] a list:
 
-* [`coordinator_stats`][map_lambda.Lambdas.coordinator_stats] - one per
-  coordinator invocation, i.e. per partition per call.
-  [`summarize_coordinators`][map_lambda.stats.summarize_coordinators] renders them.
+* [`dispatcher_stats`][map_lambda.Lambdas.dispatcher_stats] - one per
+  dispatcher invocation, i.e. per partition per call.
+  [`summarize_dispatchers`][map_lambda.stats.summarize_dispatchers] renders them.
 * [`invocation_stats`][map_lambda.Lambdas.invocation_stats] - one per worker
-  invocation, built by the coordinator only when asked (`return_stats`), and
+  invocation, built by the dispatcher only when asked (`return_stats`), and
   arriving on the frames as the run goes.
   [`summarize_invocations`][map_lambda.stats.summarize_invocations] renders them.
 
@@ -119,45 +119,45 @@ def read_jsonl(path: str | Path) -> list[Stats]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def summarize_coordinators(coordinator_stats: list[Stats]) -> str:
+def summarize_dispatchers(dispatcher_stats: list[Stats]) -> str:
     """
-    A short human-readable summary of a run's coordinators.
+    A short human-readable summary of a run's dispatchers.
     """
-    if not coordinator_stats:
-        return "coordinators: none"
-    dispatched = sum(r.get("dispatched", 0) for r in coordinator_stats)
-    retried = sum(r.get("retried", 0) for r in coordinator_stats)
-    waited = sum(r.get("retry_wait_ms", 0.0) for r in coordinator_stats) / 1000
+    if not dispatcher_stats:
+        return "dispatchers: none"
+    dispatched = sum(r.get("dispatched", 0) for r in dispatcher_stats)
+    retried = sum(r.get("retried", 0) for r in dispatcher_stats)
+    waited = sum(r.get("retry_wait_ms", 0.0) for r in dispatcher_stats) / 1000
     # Absent from a local run, which has no shared client set to build.
     # Saying "0 cold" there would be a claim about something not measured.
-    reported = [r["cold"] for r in coordinator_stats if r.get("cold") is not None]
+    reported = [r["cold"] for r in dispatcher_stats if r.get("cold") is not None]
     cold = f", {sum(reported)} cold" if reported else ""
-    calls = {r["call"] for r in coordinator_stats}
+    calls = {r["call"] for r in dispatcher_stats}
     spreads = []
     # The widest call is what the connections have to cover: a session's
     # calls need not ask for the same concurrency.
     widest = 0
     for call in calls:
-        partitions = [r for r in coordinator_stats if r["call"] == call]
+        partitions = [r for r in dispatcher_stats if r["call"] == call]
         elapsed = [r.get("elapsed_ms", 0.0) for r in partitions]
         spreads.append((max(elapsed) - min(elapsed)) / 1000)
         widest = max(widest, sum(r.get("connections", 0) for r in partitions))
-    # A range when they differ: `split` can push one coordinator over a
+    # A range when they differ: `split` can push one dispatcher over a
     # 100-in-flight boundary and not the rest, and the smallest queues first.
-    each = sorted({r.get("connections", 0) for r in coordinator_stats})
-    per_coordinator = f"{each[0]}" if len(each) == 1 else f"{each[0]}-{each[-1]}"
-    slowest = max(r.get("elapsed_ms", 0.0) for r in coordinator_stats) / 1000
+    each = sorted({r.get("connections", 0) for r in dispatcher_stats})
+    per_dispatcher = f"{each[0]}" if len(each) == 1 else f"{each[0]}-{each[-1]}"
+    slowest = max(r.get("elapsed_ms", 0.0) for r in dispatcher_stats) / 1000
     share = f" ({100 * retried / dispatched:.2f}%)" if dispatched else ""
     # Only when it happened: backoff turns throttling into a slower run
     # rather than a failed one, and nothing else here would say so.
     waiting = f", {waited:.1f}s of backoff" if waited else ""
     return (
-        f"coordinators:   {len(coordinator_stats)} invocations over "
+        f"dispatchers:   {len(dispatcher_stats)} invocations over "
         f"{len(calls)} call(s){cold}\n"
         # Invocations, not work items: a retry re-sends an invocation.
         f"                {dispatched:,} invocations dispatched, "
         f"{retried:,} retried{share}{waiting}\n"
-        f"                {per_coordinator} HTTP/2 connection(s) per coordinator, "
+        f"                {per_dispatcher} HTTP/2 connection(s) per dispatcher, "
         f"~{widest * MAX_STREAMS_PER_CONNECTION:,} in flight available\n"
         f"                slowest partition {slowest:.1f}s, worst spread within a "
         f"call {max(spreads):.1f}s"

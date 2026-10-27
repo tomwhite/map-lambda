@@ -1,4 +1,4 @@
-//! Turning a coordinator's response body back into frames.
+//! Turning a dispatcher's response body back into frames.
 
 use crate::Error;
 use map_lambda_protocol::Frame;
@@ -29,7 +29,7 @@ impl Framer {
             if !line.iter().all(u8::is_ascii_whitespace) {
                 frames.push(
                     serde_json::from_slice(line)
-                        .map_err(Error::json("reading a coordinator frame"))?,
+                        .map_err(Error::json("reading a dispatcher frame"))?,
                 );
             }
         }

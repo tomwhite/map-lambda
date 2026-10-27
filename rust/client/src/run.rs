@@ -1,8 +1,8 @@
-//! One call: its inputs partitioned across coordinators, their frames
+//! One call: its inputs partitioned across dispatchers, their frames
 //! merged as they arrive, and every partition checked once all are in.
 
 use crate::frames::Framer;
-use crate::plan::{coordinators_for, split, stride};
+use crate::plan::{dispatchers_for, split, stride};
 use crate::transport::Transport;
 use crate::Error;
 use async_stream::try_stream;
@@ -16,18 +16,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// What one `map_unordered` or `for_each` is asked to do.
 #[derive(Debug, Clone)]
 pub struct Call {
-    /// The name the coordinator is deployed under.
-    pub coordinator_function: String,
+    /// The name the dispatcher is deployed under.
+    pub dispatcher_function: String,
     pub target_function: String,
     pub input_key: String,
     /// The worker's payload, less its input.
     pub template: Map<String, Value>,
     /// `None` for the fewest that can hold `concurrency`.
-    pub coordinators: Option<usize>,
+    pub dispatchers: Option<usize>,
     /// Worker invocations in flight across the whole call.
     pub concurrency: usize,
     pub retries: usize,
-    /// A local `cargo lambda watch` for the coordinators to invoke workers
+    /// A local `cargo lambda watch` for the dispatchers to invoke workers
     /// on; `None` for real Lambda.
     pub endpoint_url: Option<String>,
     pub return_outputs: bool,
@@ -48,7 +48,7 @@ pub struct Batch {
     /// One per partition, all in the last batch: they arrive before any
     /// is checked, so a call that fails still says what each partition
     /// did.
-    pub coordinators: Vec<Record<Response>>,
+    pub dispatchers: Vec<Record<Response>>,
 }
 
 impl Batch {
@@ -56,11 +56,11 @@ impl Batch {
         self.done == 0
             && self.outputs.is_empty()
             && self.invocations.is_empty()
-            && self.coordinators.is_empty()
+            && self.dispatchers.is_empty()
     }
 }
 
-/// A coordinator's own record, stamped with the call it belongs to.
+/// A dispatcher's own record, stamped with the call it belongs to.
 #[derive(Debug, Clone, Serialize)]
 pub struct Record<T> {
     #[serde(flatten)]
@@ -71,13 +71,13 @@ pub struct Record<T> {
 }
 
 /// A call's batches as they arrive. It ends with an error if the call
-/// fails; dropping it tears down the coordinators still running.
+/// fails; dropping it tears down the dispatchers still running.
 pub type Run = BoxStream<'static, Result<Batch, Error>>;
 
-/// Start `inputs` through `call.coordinators` coordinators.
+/// Start `inputs` through `call.dispatchers` dispatchers.
 ///
 /// Refuses, with nothing invoked, a call that could not have worked: a
-/// split no coordinator could carry, or a partition over Lambda's
+/// split no dispatcher could carry, or a partition over Lambda's
 /// request limit.
 pub fn dispatch(
     transport: Arc<dyn Transport>,
@@ -86,8 +86,8 @@ pub fn dispatch(
 ) -> Result<Run, Error> {
     let local = call.endpoint_url.is_some();
     let count = call
-        .coordinators
-        .unwrap_or_else(|| coordinators_for(call.concurrency, local));
+        .dispatchers
+        .unwrap_or_else(|| dispatchers_for(call.concurrency, local));
     let shares = split(call.concurrency, count, local)?;
     let partitions = stride(inputs, count);
     let expected: Vec<usize> = partitions.iter().map(Vec::len).collect();
@@ -107,7 +107,7 @@ pub fn dispatch(
                 return_stats: call.return_stats,
                 return_outputs: call.return_outputs,
             })
-            .map_err(Error::json("building a coordinator request"))
+            .map_err(Error::json("building a dispatcher request"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (partition, payload) in payloads.iter().enumerate() {
@@ -129,12 +129,8 @@ pub fn dispatch(
     };
     let mut arriving = futures::stream::select_all(payloads.into_iter().enumerate().map(
         |(partition, payload)| {
-            frames(
-                transport.clone(),
-                call.coordinator_function.clone(),
-                payload,
-            )
-            .map(move |frame| (partition, frame))
+            frames(transport.clone(), call.dispatcher_function.clone(), payload)
+                .map(move |frame| (partition, frame))
         },
     ));
 
@@ -162,7 +158,7 @@ pub fn dispatch(
                             .into_iter()
                             .map(|stat| stamp.on(Stat { index: place(stat.index), ..stat }))
                             .collect(),
-                        coordinators: Vec::new(),
+                        dispatchers: Vec::new(),
                     };
                     if !batch.is_empty() {
                         yield batch;
@@ -177,7 +173,7 @@ pub fn dispatch(
             .map(|result| result.expect("a partition's stream ends with its result or an error"))
             .collect();
         yield Batch {
-            coordinators: responses.iter().cloned().map(|r| stamp.on(r)).collect(),
+            dispatchers: responses.iter().cloned().map(|r| stamp.on(r)).collect(),
             ..Batch::default()
         };
         for (partition, response) in responses.iter().enumerate() {
@@ -202,7 +198,7 @@ impl Stamp {
     }
 }
 
-/// One coordinator's frames as they arrive, ending in its result.
+/// One dispatcher's frames as they arrive, ending in its result.
 fn frames(
     transport: Arc<dyn Transport>,
     function: String,
@@ -224,7 +220,7 @@ fn frames(
     })
 }
 
-/// Fail unless a coordinator did all of its partition, and cleanly.
+/// Fail unless a dispatcher did all of its partition, and cleanly.
 ///
 /// A short partition is silent - skipped work just never happens - so
 /// the count is checked as well as the errors, against `expected`, the

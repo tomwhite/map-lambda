@@ -5,13 +5,13 @@ from typing import Any, Literal, Self
 
 from . import _native
 
-# Worker invocations in flight per run, split across its coordinators.
+# Worker invocations in flight per run, split across its dispatchers.
 DEFAULT_CONCURRENCY = 100
 
 # A local `cargo lambda watch` server, started from rust/.
 LOCAL_ENDPOINT_URL = _native.LOCAL_ENDPOINT_URL
 
-DEFAULT_COORDINATOR_FUNCTION = "coordinator"
+DEFAULT_DISPATCHER_FUNCTION = "dispatcher"
 
 __docformat__ = "google"
 
@@ -32,18 +32,18 @@ class Lambdas:
     lambda watch instead.
     """
 
-    coordinators: int | Literal["auto"] = "auto"
+    dispatchers: int | Literal["auto"] = "auto"
     """
-    The number of coordinators the inputs are partitioned across.
+    The number of dispatchers the inputs are partitioned across.
 
-    `"auto"` uses the fewest number of coordinators that respects AWS Lambda
+    `"auto"` uses the fewest number of dispatchers that respects AWS Lambda
     limits.
     """
 
     concurrency: int = DEFAULT_CONCURRENCY
     """
     The total number of worker lambdas in flight for the whole run, split
-    across coordinators.
+    across dispatchers.
     """
 
     retries: int = 2
@@ -59,12 +59,12 @@ class Lambdas:
     last call.
     """
 
-    coordinator_stats: list[dict[str, Any]] | None = None
+    dispatcher_stats: list[dict[str, Any]] | None = None
     """
-    Pass a list to collect stats for the coordinators - one record per
-    coordinator invocation, holding:
+    Pass a list to collect stats for the dispatchers - one record per
+    dispatcher invocation, holding:
 
-    * `req_id` - AWS's id for the coordinator's own invocation, for finding
+    * `req_id` - AWS's id for the dispatcher's own invocation, for finding
       its run in CloudWatch
     * `dispatched` - invocations it sent, which is its partition's size
     * `succeeded` - invocations that answered
@@ -91,7 +91,7 @@ class Lambdas:
     * `req_id` - AWS's id for the worker invocation, for joining to CloudWatch.
       Empty against `cargo lambda watch`, which assigns none
     * `invoke_start`, `invoke_end` - epoch seconds, spanning every attempt
-    * `call`, `call_start` - as in [`coordinator_stats`][map_lambda.Lambdas.coordinator_stats]
+    * `call`, `call_start` - as in [`dispatcher_stats`][map_lambda.Lambdas.dispatcher_stats]
     """
 
     _calls: int = field(default=0, init=False, repr=False)
@@ -166,10 +166,10 @@ class Lambdas:
             client,
             inputs,
             constant_args={} if constant_args is None else constant_args,
-            coordinator_function=DEFAULT_COORDINATOR_FUNCTION,
+            dispatcher_function=DEFAULT_DISPATCHER_FUNCTION,
             target_function=function_name,
             input_key=input_key,
-            coordinators=None if self.coordinators == "auto" else self.coordinators,
+            dispatchers=None if self.dispatchers == "auto" else self.dispatchers,
             concurrency=self.concurrency,
             retries=self.retries,
             endpoint_url=self.endpoint_url,
@@ -177,14 +177,14 @@ class Lambdas:
             return_stats=self.invocation_stats is not None,
             call=call,
         )
-        # Closed explicitly so that stopping early tears the coordinators
+        # Closed explicitly so that stopping early tears the dispatchers
         # down now, rather than whenever `run` is collected.
         try:
             async for batch in run:
                 if self.invocation_stats is not None:
                     self.invocation_stats.extend(batch.invocation_stats)
-                if self.coordinator_stats is not None:
-                    self.coordinator_stats.extend(batch.coordinator_stats)
+                if self.dispatcher_stats is not None:
+                    self.dispatcher_stats.extend(batch.dispatcher_stats)
                 if self.on_progress is not None and batch.done:
                     self.on_progress(batch.done)
                 for answer in batch.answers:
@@ -242,11 +242,11 @@ async def map_unordered(
     input_key: str,
     constant_args: dict[str, Any] | None = None,
     endpoint_url: str | None = None,
-    coordinators: int | Literal["auto"] = "auto",
+    dispatchers: int | Literal["auto"] = "auto",
     concurrency: int = DEFAULT_CONCURRENCY,
     retries: int = 2,
     on_progress: Callable[[int], None] | None = None,
-    coordinator_stats: list[dict[str, Any]] | None = None,
+    dispatcher_stats: list[dict[str, Any]] | None = None,
     invocation_stats: list[dict[str, Any]] | None = None,
 ) -> AsyncGenerator[tuple[int, Any], None]:
     """
@@ -267,11 +267,11 @@ async def map_unordered(
     """
     async with Lambdas(
         endpoint_url=endpoint_url,
-        coordinators=coordinators,
+        dispatchers=dispatchers,
         concurrency=concurrency,
         retries=retries,
         on_progress=on_progress,
-        coordinator_stats=coordinator_stats,
+        dispatcher_stats=dispatcher_stats,
         invocation_stats=invocation_stats,
     ) as lambdas:
         async for answer in lambdas.map_unordered(
@@ -291,11 +291,11 @@ async def for_each(
     input_key: str,
     constant_args: dict[str, Any] | None = None,
     endpoint_url: str | None = None,
-    coordinators: int | Literal["auto"] = "auto",
+    dispatchers: int | Literal["auto"] = "auto",
     concurrency: int = DEFAULT_CONCURRENCY,
     retries: int = 2,
     on_progress: Callable[[int], None] | None = None,
-    coordinator_stats: list[dict[str, Any]] | None = None,
+    dispatcher_stats: list[dict[str, Any]] | None = None,
     invocation_stats: list[dict[str, Any]] | None = None,
 ) -> None:
     """
@@ -307,11 +307,11 @@ async def for_each(
     """
     async with Lambdas(
         endpoint_url=endpoint_url,
-        coordinators=coordinators,
+        dispatchers=dispatchers,
         concurrency=concurrency,
         retries=retries,
         on_progress=on_progress,
-        coordinator_stats=coordinator_stats,
+        dispatcher_stats=dispatcher_stats,
         invocation_stats=invocation_stats,
     ) as lambdas:
         await lambdas.for_each(

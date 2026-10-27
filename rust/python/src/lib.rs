@@ -55,12 +55,12 @@ impl Stub {
         Self(Arc::default())
     }
 
-    /// The body the next coordinator invocation answers with.
+    /// The body the next dispatcher invocation answers with.
     fn respond(&self) -> Body {
         Body(self.0.respond())
     }
 
-    /// Every coordinator request, as sent.
+    /// Every dispatcher request, as sent.
     #[getter]
     fn requests(&self) -> Vec<String> {
         self.0
@@ -81,7 +81,7 @@ impl Stub {
     }
 }
 
-/// One coordinator's response body, written as the test goes.
+/// One dispatcher's response body, written as the test goes.
 #[pyclass(frozen)]
 struct Body(UnboundedSender<Vec<u8>>);
 
@@ -93,7 +93,7 @@ impl Body {
             .map_err(|_| PyRuntimeError::new_err("the client has stopped reading this body"))
     }
 
-    /// End the body, as a coordinator's stream ends.
+    /// End the body, as a dispatcher's stream ends.
     fn close(&self) {
         self.0.close_channel();
     }
@@ -141,7 +141,7 @@ struct Batch {
     /// `(index, answer)` pairs.
     answers: Py<PyList>,
     invocation_stats: Py<PyList>,
-    coordinator_stats: Py<PyList>,
+    dispatcher_stats: Py<PyList>,
 }
 
 impl Batch {
@@ -154,7 +154,7 @@ impl Batch {
             done: batch.done,
             answers: answers.unbind(),
             invocation_stats: records(py, &batch.invocations)?,
-            coordinator_stats: records(py, &batch.coordinators)?,
+            dispatcher_stats: records(py, &batch.dispatchers)?,
         })
     }
 }
@@ -200,7 +200,7 @@ impl Run {
         })
     }
 
-    /// Tear down whatever coordinators are still running.
+    /// Tear down whatever dispatchers are still running.
     fn close(&self) {
         drop(self.run.lock().expect("unpoisoned").take());
     }
@@ -222,18 +222,18 @@ fn json<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>, what: &str) ->
 /// marshalled exactly as they always were.
 #[pyfunction]
 #[pyo3(signature = (
-    client, inputs, *, constant_args, coordinator_function, target_function, input_key,
-    coordinators, concurrency, retries, endpoint_url, return_outputs, return_stats, call,
+    client, inputs, *, constant_args, dispatcher_function, target_function, input_key,
+    dispatchers, concurrency, retries, endpoint_url, return_outputs, return_stats, call,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
     client: &Bound<'_, PyAny>,
     inputs: &Bound<'_, PyAny>,
     constant_args: &Bound<'_, PyAny>,
-    coordinator_function: String,
+    dispatcher_function: String,
     target_function: String,
     input_key: String,
-    coordinators: Option<usize>,
+    dispatchers: Option<usize>,
     concurrency: usize,
     retries: usize,
     endpoint_url: Option<String>,
@@ -241,7 +241,7 @@ fn dispatch(
     return_stats: bool,
     call: usize,
 ) -> PyResult<Run> {
-    // The coordinator reads it as the worker's payload template, so
+    // The dispatcher reads it as the worker's payload template, so
     // anything else fails inside AWS with every invocation billed for.
     if !constant_args.is_instance_of::<PyDict>() {
         return Err(PyTypeError::new_err(format!(
@@ -254,11 +254,11 @@ fn dispatch(
 
     let transport = transport_of(client)?;
     let call = Call {
-        coordinator_function,
+        dispatcher_function,
         target_function,
         input_key,
         template,
-        coordinators,
+        dispatchers,
         concurrency,
         retries,
         endpoint_url,

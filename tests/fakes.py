@@ -9,19 +9,19 @@ from typing import Any
 
 from map_lambda import _native
 
-# The metadata prelude a deployed coordinator's stream opens with, which
+# The metadata prelude a deployed dispatcher's stream opens with, which
 # the client skips.
-COORDINATOR_PRELUDE = b'{"statusCode":200,"headers":{}}' + b"\x00" * 8
+DISPATCHER_PRELUDE = b'{"statusCode":200,"headers":{}}' + b"\x00" * 8
 
 
 def lines(*frames: Any) -> bytes:
-    """Frames as a coordinator writes them, one JSON line each."""
+    """Frames as a dispatcher writes them, one JSON line each."""
     return b"".join(json.dumps(f).encode() + b"\n" for f in frames)
 
 
-def coordinator_body(*frames: Any) -> bytes:
+def dispatcher_body(*frames: Any) -> bytes:
     """A whole response body: the prelude, then the frames."""
-    return COORDINATOR_PRELUDE + lines(*frames)
+    return DISPATCHER_PRELUDE + lines(*frames)
 
 
 def completed(
@@ -44,9 +44,9 @@ def completed(
     }
 
 
-def coordinator_result(succeeded: int, **overrides: Any) -> dict[str, Any]:
+def dispatcher_result(succeeded: int, **overrides: Any) -> dict[str, Any]:
     """
-    One coordinator's result frame.
+    One dispatcher's result frame.
 
     `succeeded` sets `dispatched` too, because the ordinary case is a
     partition that did all of its work; `**overrides` is how a test says
@@ -76,10 +76,10 @@ class RecordingClient(_native.Stub):
     """
     A Lambda client that records the requests it was sent and replays
     canned responses. Use it to assert **what went on the wire**, and to
-    put a coordinator into a state a real one is hard to provoke, like a
+    put a dispatcher into a state a real one is hard to provoke, like a
     short partition or a transport error.
 
-    Each canned response is either a result dict (`coordinator_result`),
+    Each canned response is either a result dict (`dispatcher_result`),
     streamed as the frames accounting for its work and then the result,
     or a list of frames to stream verbatim - which is how a test sends a
     stream that does *not* add up. For a body written as the test goes,
@@ -96,12 +96,12 @@ class RecordingClient(_native.Stub):
                     {"Result": canned},
                 ]
             body = self.respond()
-            body.write(coordinator_body(*frames))
+            body.write(dispatcher_body(*frames))
             body.close()
 
     @property
     def payloads(self) -> list[dict]:
-        """One request per coordinator invocation, i.e. per partition."""
+        """One request per dispatcher invocation, i.e. per partition."""
         return [json.loads(request) for request in self.requests]
 
     @property

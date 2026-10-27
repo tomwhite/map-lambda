@@ -19,7 +19,7 @@ and the stats across them:
 
     from map_lambda import Lambdas
 
-    async with Lambdas(coordinators=4, concurrency=500) as lambdas:
+    async with Lambdas(dispatchers=4, concurrency=500) as lambdas:
         async for index, answer in lambdas.map_unordered(
             "square", list(range(10_000)), input_key="input"
         ):
@@ -27,8 +27,8 @@ and the stats across them:
 
 The public API also includes utilities for analysing stats for a run:
 
-* `stats` - what a run recorded about itself: `summarize_coordinators`
-  for the coordinators and `summarize_invocations` for the workers.
+* `stats` - what a run recorded about itself: `summarize_dispatchers`
+  for the dispatchers and `summarize_invocations` for the workers.
 * `timeline.generate_timeline` - a chart of a run from invocation stats.
 """
 

@@ -1,5 +1,5 @@
-//! The wire contract between a client and a coordinator: what a
-//! coordinator is asked for, the frames it answers with, and the limits
+//! The wire contract between a client and a dispatcher: what a
+//! dispatcher is asked for, the frames it answers with, and the limits
 //! both ends are bound by.
 //!
 //! Every type derives both directions, because both ends depend on this
@@ -12,18 +12,18 @@ use serde_json::{Map, Value};
 /// requests on one HTTP/2 connection queue.
 pub const MAX_STREAMS_PER_CONNECTION: usize = 128;
 
-/// How many invocations a coordinator puts through one HTTP/2 connection:
+/// How many invocations a dispatcher puts through one HTTP/2 connection:
 /// `MAX_STREAMS_PER_CONNECTION` less headroom.
 pub const STREAMS_PER_CONNECTION: usize = 100;
 
-/// The most invocations one coordinator will carry at once.
+/// The most invocations one dispatcher will carry at once.
 pub const MAX_IN_FLIGHT: usize = 1_600;
 
-/// What a coordinator against `cargo lambda watch` carries: it builds one
+/// What a dispatcher against `cargo lambda watch` carries: it builds one
 /// throwaway client, so one connection's worth.
 pub const MAX_IN_FLIGHT_LOCAL: usize = STREAMS_PER_CONNECTION;
 
-/// Clients a coordinator builds at cold start, enough to cover
+/// Clients a dispatcher builds at cold start, enough to cover
 /// `MAX_IN_FLIGHT`.
 pub const MAX_HTTP_CLIENTS: usize = MAX_IN_FLIGHT.div_ceil(STREAMS_PER_CONNECTION);
 
@@ -52,8 +52,8 @@ pub struct Request {
     pub inputs: Vec<Value>,
     /// Which key an input goes under in the worker's payload.
     pub input_key: String,
-    /// How many invocations may be in flight from this coordinator. The
-    /// run's total in flight is the sum across coordinators.
+    /// How many invocations may be in flight from this dispatcher. The
+    /// run's total in flight is the sum across dispatchers.
     pub concurrency: usize,
     /// Where to send the worker invocations, for a local run against
     /// `cargo lambda watch`. `None` means real Lambda.
@@ -116,7 +116,7 @@ impl Completed {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
-    /// This coordinator's own AWS request id, so its run can be found in
+    /// This dispatcher's own AWS request id, so its run can be found in
     /// CloudWatch alongside the invocations it dispatched.
     pub req_id: String,
     pub dispatched: usize,
@@ -177,7 +177,7 @@ mod tests {
     /// The two ends derive opposite halves of each type, so a field
     /// only one of them names would be dropped rather than caught.
     #[test]
-    fn every_frame_a_coordinator_writes_reads_back_as_the_same_frame() {
+    fn every_frame_a_dispatcher_writes_reads_back_as_the_same_frame() {
         for frame in [
             Frame::Completed(Completed::default()),
             Frame::Completed(Completed {

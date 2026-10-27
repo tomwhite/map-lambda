@@ -7,7 +7,7 @@ How long a round of `echo` invocations takes, and what one costs.
     uv run python benchmarks/echo_latency.py --endpoint-url http://localhost:9000
 
 `echo` does nothing but read its input back, so what this measures is
-map-lambda's own overhead: the coordinator's dispatch, the invoke round
+map-lambda's own overhead: the dispatcher's fan-out, the invoke round
 trip, and the cold starts in the first wave. A worker doing real work
 adds its own time to the per-invocation figures and changes nothing else.
 
@@ -39,7 +39,7 @@ async def run(args: argparse.Namespace) -> tuple[float, list[dict], list[Any]]:
     invocations: list[dict] = []
     async with Lambdas(
         endpoint_url=args.endpoint_url or (LOCAL_ENDPOINT_URL if args.local else None),
-        coordinators=args.coordinators,
+        dispatchers=args.dispatchers,
         concurrency=args.concurrency,
         invocation_stats=invocations,
     ) as lambdas:
@@ -62,7 +62,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--invocations", type=int, default=1000)
     parser.add_argument("--concurrency", type=int, default=100)
-    parser.add_argument("--coordinators", type=int, default=1)
+    parser.add_argument("--dispatchers", type=int, default=1)
     parser.add_argument(
         "--local", action="store_true", help=f"against {LOCAL_ENDPOINT_URL} rather than AWS"
     )
@@ -72,8 +72,8 @@ def main() -> None:
     parser.add_argument(
         "--jsonl",
         default=None,
-        help="write the invocation records here. Striding makes `index %% coordinators` "
-        "the coordinator that ran an invocation, so the records carry which one",
+        help="write the invocation records here. Striding makes `index %% dispatchers` "
+        "the dispatcher that ran an invocation, so the records carry which one",
     )
     args = parser.parse_args()
 
@@ -81,7 +81,7 @@ def main() -> None:
     where = args.endpoint_url or ("local" if args.local else "AWS")
     print(
         f"{args.invocations} echo invocations, {where}, concurrency {args.concurrency}, "
-        f"{args.coordinators} coordinator(s)"
+        f"{args.dispatchers} dispatcher(s)"
     )
     print(stats_module.summarize_invocations(invocations, elapsed=elapsed))
     if args.jsonl:

@@ -87,7 +87,7 @@ jobs:
       # `watch` compiles each function on its first request, and the tests
       # fail on a read timeout rather than waiting - so pay for the build
       # here, where nothing is on the clock.
-      - run: cargo build --locked -p map-lambda-coordinator -p echo
+      - run: cargo build --locked -p map-lambda-dispatcher -p echo
         working-directory: rust
 
       - name: Serve the lambdas
