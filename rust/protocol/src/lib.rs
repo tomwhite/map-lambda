@@ -3,7 +3,9 @@
 //! both ends are bound by.
 //!
 //! Every type derives both directions, because both ends depend on this
-//! crate. Callers use the client's re-exports, not this.
+//! crate. Every struct refuses fields it does not know, so ends built
+//! from different versions fail rather than quietly disagree. Callers use
+//! the client's re-exports, not this.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -42,6 +44,7 @@ pub fn connections_for(max_in_flight: usize) -> usize {
 /// What the client sends: a function to call, a payload to call it
 /// with, and the work to spread across the calls.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     /// Worker to invoke once per input, e.g. "echo".
     pub worker_function: String,
@@ -69,6 +72,7 @@ pub struct Request {
 
 /// Statistics for a single worker invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvocationStats {
     /// Where this invocation's input sat in the partition, counting from 0.
     pub index: usize,
@@ -84,6 +88,7 @@ pub struct InvocationStats {
 /// `value` is the worker's whole body, verbatim. Never null: a worker
 /// that returned nothing gets no `Output` at all.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Output {
     /// Where the input this came from sat in the partition, as `InvocationStats::index`.
     pub index: usize,
@@ -94,6 +99,7 @@ pub struct Output {
 
 /// What finished since the last frame.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Completed {
     /// Invocations that came back successfully.
     pub succeeded: usize,
@@ -118,6 +124,7 @@ impl Completed {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DispatcherStats {
     /// This dispatcher's own AWS request id, so its run can be found in
     /// CloudWatch alongside the invocations it dispatched.
@@ -194,6 +201,12 @@ mod tests {
             let read: Frame = serde_json::from_str(&line).expect("round-trips");
             assert_eq!(serde_json::to_string(&read).expect("serializes"), line);
         }
+    }
+
+    #[test]
+    fn a_field_this_side_does_not_know_is_refused() {
+        let line = r#"{"Completed":{"succeeded":0,"outputs":[],"invocation_stats":[],"first_error":null,"extra":1}}"#;
+        assert!(serde_json::from_str::<Frame>(line).is_err());
     }
 
     #[test]
