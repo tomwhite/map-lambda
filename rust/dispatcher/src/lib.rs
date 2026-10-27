@@ -1,14 +1,22 @@
 //! A dispatcher: fans one partition of a call's inputs out to workers from
 //! inside Lambda.
 //!
-//! A dispatcher is generic over workers, it is told a function name, a payload
-//! template and a list of inputs by the client.
+//! It is deployed as a binary around [`run`], named `dispatcher` by
+//! default:
 //!
-//! - `clients` - the Lambda clients, and how many there have to be.
-//! - `invoke` - one worker invocation, with retries.
-//! - `tally` - what the partition has come to so far.
-//! - `dispatch` - the loop that turns inputs into invocations.
-//! - `handler` - response streaming, and the entry point.
+//! ```no_run
+//! #[tokio::main]
+//! async fn main() -> Result<(), lambda_runtime::Error> {
+//!     map_lambda_dispatcher::run().await
+//! }
+//! ```
+#![warn(missing_docs)]
+
+// - `clients` - the Lambda clients, and how many there have to be.
+// - `invoke` - one worker invocation, with retries.
+// - `tally` - what the partition has come to so far.
+// - `dispatch` - the loop that turns inputs into invocations.
+// - `handler` - response streaming, and the entry point.
 
 use lambda_runtime::{run as lambda_run, service_fn, tracing, Error};
 use map_lambda_protocol as protocol;

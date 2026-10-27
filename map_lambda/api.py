@@ -6,12 +6,12 @@ from typing import Any, Literal, Self
 from . import _native
 
 # Worker invocations in flight per run, split across its dispatchers.
-DEFAULT_CONCURRENCY = 100
+DEFAULT_CONCURRENCY: int = _native.DEFAULT_CONCURRENCY
 
 # A local `cargo lambda watch` server, started from rust/.
 LOCAL_ENDPOINT_URL = _native.LOCAL_ENDPOINT_URL
 
-DEFAULT_DISPATCHER_FUNCTION = "dispatcher"
+DEFAULT_DISPATCHER_FUNCTION: str = _native.DEFAULT_DISPATCHER_FUNCTION
 
 __docformat__ = "google"
 
@@ -94,8 +94,8 @@ class Lambdas:
     * `call`, `call_start` - as in [`dispatcher_stats`][map_lambda.Lambdas.dispatcher_stats]
     """
 
-    _calls: int = field(default=0, init=False, repr=False)
     _client: Any = field(default=None, init=False, repr=False)
+    _session: Any = field(default=None, init=False, repr=False)
 
     async def __aenter__(self) -> Self:
         self._client = await _native.connect(self.endpoint_url)
@@ -103,11 +103,14 @@ class Lambdas:
 
     async def __aexit__(self, *exc_info: Any) -> None:
         self._client = None
+        self._session = None
 
-    def _require_client(self) -> Any:
+    def _require_session(self) -> Any:
         if self._client is None:
             raise RuntimeError("Lambdas has no client: use `async with Lambdas(...) as lambdas:`")
-        return self._client
+        if self._session is None:
+            self._session = _native.Session(self._client, self.endpoint_url)
+        return self._session
 
     def map_unordered(
         self,
@@ -138,7 +141,7 @@ class Lambdas:
             `(index, return value)`, in the order the invocations finished.
         """
         return self._stream(
-            self._require_client(),
+            self._require_session(),
             function_name,
             inputs,
             input_key=input_key,
@@ -148,7 +151,7 @@ class Lambdas:
 
     async def _stream(
         self,
-        client: Any,
+        session: Any,
         function_name: str,
         inputs: list[Any],
         /,
@@ -161,21 +164,17 @@ class Lambdas:
         Labelled answers as they arrive, or none at all when
         `return_outputs` is false.
         """
-        call, self._calls = self._calls, self._calls + 1
-        run = _native.dispatch(
-            client,
+        run = session.dispatch(
+            function_name,
             inputs,
+            input_key=input_key,
             constant_args={} if constant_args is None else constant_args,
             dispatcher_function=DEFAULT_DISPATCHER_FUNCTION,
-            target_function=function_name,
-            input_key=input_key,
             dispatchers=None if self.dispatchers == "auto" else self.dispatchers,
             concurrency=self.concurrency,
             retries=self.retries,
-            endpoint_url=self.endpoint_url,
             return_outputs=return_outputs,
             return_stats=self.invocation_stats is not None,
-            call=call,
         )
         # Closed explicitly so that stopping early tears the dispatchers
         # down now, rather than whenever `run` is collected.
@@ -210,7 +209,7 @@ class Lambdas:
         Refer to [`map_unordered`][map_lambda.Lambdas.map_unordered] for argument definitions.
         """
         stream = self._stream(
-            self._require_client(),
+            self._require_session(),
             function_name,
             inputs,
             input_key=input_key,
@@ -231,7 +230,7 @@ class Lambdas:
         raises. For a synchronous one-off, use
         [`for_each`][map_lambda.Lambdas.for_each] with a single input.
         """
-        await _native.invoke(self._require_client(), function_name, json.dumps(payload))
+        await self._require_session().invoke(function_name, json.dumps(payload))
 
 
 async def map_unordered(

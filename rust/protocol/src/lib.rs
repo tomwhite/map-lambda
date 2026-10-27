@@ -3,7 +3,7 @@
 //! both ends are bound by.
 //!
 //! Every type derives both directions, because both ends depend on this
-//! crate.
+//! crate. Callers use the client's re-exports, not this.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
