@@ -135,6 +135,8 @@ impl Batch {
     fn from_rust(py: Python<'_>, batch: map_lambda_client::Batch) -> PyResult<Self> {
         let answers = PyList::empty(py);
         for (index, answer) in batch.answers {
+            let answer: Value = serde_json::from_str(answer.get())
+                .map_err(|e| PyValueError::new_err(format!("an answer is not JSON: {e}")))?;
             answers.append((index, pythonize::pythonize(py, &answer)?))?;
         }
         Ok(Self {

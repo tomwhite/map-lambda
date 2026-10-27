@@ -4,6 +4,7 @@
 use aws_sdk_lambda::operation::RequestId;
 use aws_sdk_lambda::primitives::Blob;
 use aws_sdk_lambda::Client;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,9 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) enum Outcome {
     Ok {
         req_id: String,
-        /// The worker's whole response body. Null for a worker that
-        /// returned nothing.
-        body: Value,
+        /// The worker's whole response body, unparsed. `None` for a
+        /// worker that answered null.
+        answer: Option<Box<RawValue>>,
     },
     /// Lambda ran the worker and the worker failed.
     Function(String),
@@ -25,15 +26,15 @@ pub(crate) enum Outcome {
 /// An invocation Lambda ran without the error channel firing: a
 /// success, whatever the body says.
 ///
-/// A body that is not JSON comes through as null, the same as answering
-/// nothing, rather than failing the invocation. `req_id` is the
+/// A body that is not JSON comes through as `None`, the same as
+/// answering null, rather than failing the invocation. `req_id` is the
 /// response's `x-amzn-requestid`, as in `read_error_channel`.
 pub(crate) fn read_body(req_id: &str, body: Option<&[u8]>) -> Outcome {
     Outcome::Ok {
         req_id: req_id.to_string(),
-        body: body
-            .and_then(|bytes| serde_json::from_slice(bytes).ok())
-            .unwrap_or(Value::Null),
+        answer: body
+            .and_then(|bytes| serde_json::from_slice::<Box<RawValue>>(bytes).ok())
+            .filter(|answer| answer.get() != "null"),
     }
 }
 
@@ -560,9 +561,9 @@ mod tests {
     #[test]
     fn a_success_takes_its_request_id_from_the_response() {
         match read_body("abc-123", Some(br#"{"written":1}"#)) {
-            Outcome::Ok { req_id, body } => {
+            Outcome::Ok { req_id, answer } => {
                 assert_eq!(req_id, "abc-123");
-                assert_eq!(body["written"], 1);
+                assert_eq!(answer.expect("an answer").get(), r#"{"written":1}"#);
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -570,11 +571,16 @@ mod tests {
 
     #[test]
     fn a_worker_that_answers_with_nothing_useful_still_succeeded() {
-        for body in [None, Some(&b"not json"[..]), Some(&b""[..])] {
+        for body in [
+            None,
+            Some(&b"not json"[..]),
+            Some(&b""[..]),
+            Some(&b" null\n"[..]),
+        ] {
             match read_body("abc-123", body) {
-                Outcome::Ok { req_id, body } => {
+                Outcome::Ok { req_id, answer } => {
                     assert_eq!(req_id, "abc-123");
-                    assert_eq!(body, Value::Null);
+                    assert!(answer.is_none(), "{answer:?}");
                 }
                 other => panic!("expected success, got {other:?}"),
             }

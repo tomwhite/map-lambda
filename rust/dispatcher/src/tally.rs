@@ -74,14 +74,11 @@ impl Tally {
         self.retried += retried;
         self.retry_wait_ms += waited_ms;
         match outcome {
-            Outcome::Ok { req_id, body } => {
+            Outcome::Ok { req_id, answer } => {
                 self.succeeded += 1;
                 // A null answer gets no entry on the wire.
-                if self.returning.outputs && !body.is_null() {
-                    self.outputs.push(Output {
-                        index,
-                        response: body,
-                    });
+                if let (true, Some(response)) = (self.returning.outputs, answer) {
+                    self.outputs.push(Output { index, response });
                 }
                 if self.returning.stats {
                     self.stats.push(Stat {
@@ -139,7 +136,7 @@ mod tests {
     fn ok(req_id: &str) -> Outcome {
         Outcome::Ok {
             req_id: req_id.to_string(),
-            body: json!({"copied": 1}),
+            answer: Some(serde_json::value::to_raw_value(&json!({"copied": 1})).expect("json")),
         }
     }
 

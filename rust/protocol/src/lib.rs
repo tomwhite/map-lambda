@@ -6,6 +6,7 @@
 //! crate. Callers use the client's re-exports, not this.
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 /// Lambda's SETTINGS_MAX_CONCURRENT_STREAMS: the hard limit, past which
@@ -86,7 +87,9 @@ pub struct Stat {
 pub struct Output {
     /// Where the input this answers sat in the partition, as `Stat::index`.
     pub index: usize,
-    pub response: Value,
+    /// As the worker wrote it: checked to be JSON, but never parsed into
+    /// a tree, which takes several times the memory of the text.
+    pub response: Box<RawValue>,
 }
 
 /// What finished since the last frame.
@@ -184,7 +187,8 @@ mod tests {
                 done: 2,
                 outputs: vec![Output {
                     index: 4,
-                    response: json!({"copied": 1}),
+                    response: serde_json::value::to_raw_value(&json!({"copied": 1}))
+                        .expect("serializes"),
                 }],
                 stats: vec![Stat {
                     index: 4,
