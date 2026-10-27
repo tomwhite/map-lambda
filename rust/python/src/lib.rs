@@ -2,13 +2,16 @@
 //!
 //! - `connect` - a `Client` for real Lambda or a local `cargo lambda watch`.
 //! - `Stub` - a stand-in for Lambda, for tests.
-//! - `dispatch` - one call, as an async iterator of `Batch`es.
-//! - `invoke` - one invocation, not waited for.
+//! - `Session` - a `map_lambda_client::Lambdas` through either: its calls,
+//!   as async iterators of `Batch`es, and `invoke`.
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
-use map_lambda_client::protocol::MAX_STREAMS_PER_CONNECTION;
-use map_lambda_client::{testing, Call, Error, Lambda, Transport, LOCAL_ENDPOINT_URL};
+use map_lambda_client::{
+    testing, Error, Lambda, Lambdas, Transport, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION,
+    LOCAL_ENDPOINT_URL,
+};
+use map_lambda_protocol::MAX_STREAMS_PER_CONNECTION;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -118,22 +121,6 @@ fn transport_of(client: &Bound<'_, PyAny>) -> PyResult<Arc<dyn Transport>> {
     )))
 }
 
-/// Invoke `function` once with `payload` and do not wait for it to run.
-#[pyfunction]
-fn invoke<'py>(
-    client: &Bound<'py, PyAny>,
-    function: String,
-    payload: String,
-) -> PyResult<Bound<'py, PyAny>> {
-    let transport = transport_of(client)?;
-    future_into_py(client.py(), async move {
-        transport
-            .invoke(&function, payload.into_bytes())
-            .await
-            .map_err(to_py)
-    })
-}
-
 /// What arrived since the last batch: see `map_lambda_client::Batch`.
 #[pyclass(frozen, get_all)]
 struct Batch {
@@ -147,14 +134,14 @@ struct Batch {
 impl Batch {
     fn from_rust(py: Python<'_>, batch: map_lambda_client::Batch) -> PyResult<Self> {
         let answers = PyList::empty(py);
-        for (index, answer) in batch.outputs {
+        for (index, answer) in batch.answers {
             answers.append((index, pythonize::pythonize(py, &answer)?))?;
         }
         Ok(Self {
             done: batch.done,
             answers: answers.unbind(),
-            invocation_stats: records(py, &batch.invocations)?,
-            dispatcher_stats: records(py, &batch.dispatchers)?,
+            invocation_stats: records(py, &batch.invocation_stats)?,
+            dispatcher_stats: records(py, &batch.dispatcher_stats)?,
         })
     }
 }
@@ -216,60 +203,87 @@ fn json<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>, what: &str) ->
         .map_err(|e| PyValueError::new_err(format!("{what} are not valid JSON: {e}")))
 }
 
-/// Start one call through `client`, a `Client` or a `Stub`.
+/// A `map_lambda_client::Lambdas` through a `Client` or a `Stub`.
 ///
-/// Inputs and constant args go through `json.dumps`, so they are
-/// marshalled exactly as they always were.
-#[pyfunction]
-#[pyo3(signature = (
-    client, inputs, *, constant_args, dispatcher_function, target_function, input_key,
-    dispatchers, concurrency, retries, endpoint_url, return_outputs, return_stats, call,
-))]
-#[allow(clippy::too_many_arguments)]
-fn dispatch(
-    client: &Bound<'_, PyAny>,
-    inputs: &Bound<'_, PyAny>,
-    constant_args: &Bound<'_, PyAny>,
-    dispatcher_function: String,
-    target_function: String,
-    input_key: String,
-    dispatchers: Option<usize>,
-    concurrency: usize,
-    retries: usize,
-    endpoint_url: Option<String>,
-    return_outputs: bool,
-    return_stats: bool,
-    call: usize,
-) -> PyResult<Run> {
-    // The dispatcher reads it as the worker's payload template, so
-    // anything else fails inside AWS with every invocation billed for.
-    if !constant_args.is_instance_of::<PyDict>() {
-        return Err(PyTypeError::new_err(format!(
-            "constant_args must be a dict, not {}",
-            constant_args.get_type().name()?
-        )));
-    }
-    let template: Map<String, Value> = json(constant_args, "constant_args")?;
-    let inputs: Vec<Value> = json(inputs, "inputs")?;
+/// Settings come with each call, since a Python `Lambdas` can change them.
+#[pyclass(frozen)]
+struct Session(Mutex<Lambdas>);
 
-    let transport = transport_of(client)?;
-    let call = Call {
-        dispatcher_function,
-        target_function,
-        input_key,
-        template,
-        dispatchers,
-        concurrency,
-        retries,
-        endpoint_url,
-        return_outputs,
-        return_stats,
-        call,
-    };
-    let run = map_lambda_client::dispatch(transport, call, inputs).map_err(to_py)?;
-    Ok(Run {
-        run: Arc::new(Mutex::new(Some(run))),
-    })
+#[pymethods]
+impl Session {
+    #[new]
+    #[pyo3(signature = (client, endpoint_url=None))]
+    fn new(client: &Bound<'_, PyAny>, endpoint_url: Option<String>) -> PyResult<Self> {
+        Ok(Self(Mutex::new(Lambdas::new(
+            transport_of(client)?,
+            endpoint_url,
+        ))))
+    }
+
+    /// A `map_unordered` if `return_outputs`, else a `for_each`.
+    ///
+    /// Inputs and constant args go through `json.dumps`, so they are
+    /// marshalled exactly as they always were.
+    #[pyo3(signature = (
+        function, inputs, *, input_key, constant_args, dispatcher_function, dispatchers,
+        concurrency, retries, return_outputs, return_stats,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        function: &str,
+        inputs: &Bound<'_, PyAny>,
+        input_key: &str,
+        constant_args: &Bound<'_, PyAny>,
+        dispatcher_function: String,
+        dispatchers: Option<usize>,
+        concurrency: usize,
+        retries: usize,
+        return_outputs: bool,
+        return_stats: bool,
+    ) -> PyResult<Run> {
+        // The dispatcher reads it as the worker's payload template, so
+        // anything else fails inside AWS with every invocation billed for.
+        if !constant_args.is_instance_of::<PyDict>() {
+            return Err(PyTypeError::new_err(format!(
+                "constant_args must be a dict, not {}",
+                constant_args.get_type().name()?
+            )));
+        }
+        let constant_args: Map<String, Value> = json(constant_args, "constant_args")?;
+        let inputs: Vec<Value> = json(inputs, "inputs")?;
+
+        let mut lambdas = self.0.lock().expect("unpoisoned");
+        let settings = lambdas.settings_mut();
+        settings.dispatcher_function = dispatcher_function;
+        settings.dispatchers = dispatchers;
+        settings.concurrency = concurrency;
+        settings.retries = retries;
+        settings.return_stats = return_stats;
+        let run = if return_outputs {
+            lambdas.map_unordered(function, inputs, input_key, constant_args)
+        } else {
+            lambdas.for_each(function, inputs, input_key, constant_args)
+        };
+        Ok(Run {
+            run: Arc::new(Mutex::new(Some(run.map_err(to_py)?))),
+        })
+    }
+
+    /// Invoke `function` once with `payload` and do not wait for it to run.
+    fn invoke<'py>(
+        &self,
+        py: Python<'py>,
+        function: String,
+        payload: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let invoked = self
+            .0
+            .lock()
+            .expect("unpoisoned")
+            .invoke(&function, payload.into_bytes());
+        future_into_py(py, async move { invoked.await.map_err(to_py) })
+    }
 }
 
 #[pymodule]
@@ -278,10 +292,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Body>()?;
     m.add_class::<Client>()?;
     m.add_class::<Run>()?;
+    m.add_class::<Session>()?;
     m.add_class::<Stub>()?;
     m.add_function(wrap_pyfunction!(connect, m)?)?;
-    m.add_function(wrap_pyfunction!(invoke, m)?)?;
-    m.add_function(wrap_pyfunction!(dispatch, m)?)?;
+    m.add("DEFAULT_CONCURRENCY", DEFAULT_CONCURRENCY)?;
+    m.add("DEFAULT_DISPATCHER_FUNCTION", DEFAULT_DISPATCHER_FUNCTION)?;
     m.add("LOCAL_ENDPOINT_URL", LOCAL_ENDPOINT_URL)?;
     m.add("MAX_STREAMS_PER_CONNECTION", MAX_STREAMS_PER_CONNECTION)?;
     Ok(())

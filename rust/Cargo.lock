@@ -1553,6 +1553,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "map-lambda-client",
+ "map-lambda-protocol",
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",

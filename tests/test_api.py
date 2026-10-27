@@ -213,9 +213,22 @@ def test_invoke_dispatches_once_without_waiting_for_the_answer():
     asyncio.run(lambdas.invoke("delete-scratch", store="s3://bucket/scratch"))
 
     assert client.invoked == [("delete-scratch", {"store": "s3://bucket/scratch"})]
-    # not dispatch: no partition went out, and nothing was counted
+    # not dispatch: no partition went out
     assert client.payloads == []
-    assert lambdas._calls == 0
+
+
+def test_invoke_is_not_counted_as_a_call():
+    client = RecordingClient([dispatcher_result(1)])
+    stats: list[dict[str, Any]] = []
+    lambdas = _session(client, dispatcher_stats=stats)
+
+    async def invoke_then_call() -> None:
+        await lambdas.invoke("delete-scratch")
+        await lambdas.for_each("worker", [0], input_key="i")
+
+    asyncio.run(invoke_then_call())
+
+    assert [record["call"] for record in stats] == [0]
 
 
 def test_invoke_raises_when_it_could_not_be_submitted():

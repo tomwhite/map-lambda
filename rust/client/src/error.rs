@@ -3,7 +3,11 @@
 use map_lambda_protocol::MAX_REQUEST_BYTES;
 use thiserror::Error;
 
+/// Why a call was refused or failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
+// Each variant's message documents it.
+#[allow(missing_docs)]
 pub enum Error {
     #[error("a dispatcher run needs at least one dispatcher")]
     NoDispatchers,

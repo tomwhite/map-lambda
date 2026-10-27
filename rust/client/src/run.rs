@@ -8,6 +8,7 @@ use crate::Error;
 use async_stream::try_stream;
 use futures::stream::{BoxStream, StreamExt};
 use map_lambda_protocol::{Frame, Request, Response, Stat, MAX_REQUEST_BYTES};
+pub use map_lambda_protocol::{Response as DispatcherStats, Stat as InvocationStats};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
@@ -15,56 +16,61 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// What one `map_unordered` or `for_each` is asked to do.
 #[derive(Debug, Clone)]
-pub struct Call {
+pub(crate) struct Call {
     /// The name the dispatcher is deployed under.
-    pub dispatcher_function: String,
-    pub target_function: String,
-    pub input_key: String,
+    pub(crate) dispatcher_function: String,
+    pub(crate) target_function: String,
+    pub(crate) input_key: String,
     /// The worker's payload, less its input.
-    pub template: Map<String, Value>,
+    pub(crate) template: Map<String, Value>,
     /// `None` for the fewest that can hold `concurrency`.
-    pub dispatchers: Option<usize>,
+    pub(crate) dispatchers: Option<usize>,
     /// Worker invocations in flight across the whole call.
-    pub concurrency: usize,
-    pub retries: usize,
+    pub(crate) concurrency: usize,
+    pub(crate) retries: usize,
     /// A local `cargo lambda watch` for the dispatchers to invoke workers
     /// on; `None` for real Lambda.
-    pub endpoint_url: Option<String>,
-    pub return_outputs: bool,
-    pub return_stats: bool,
+    pub(crate) endpoint_url: Option<String>,
+    pub(crate) return_outputs: bool,
+    pub(crate) return_stats: bool,
     /// Which call of its session this is, stamped on every record.
-    pub call: usize,
+    pub(crate) call: usize,
 }
 
 /// What arrived since the last batch, numbered against the caller's
 /// inputs.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct Batch {
     /// Invocations that came back successfully.
     pub done: usize,
-    /// `(index into inputs, the worker's body)`.
-    pub outputs: Vec<(usize, Value)>,
-    pub invocations: Vec<Record<Stat>>,
-    /// One per partition, all in the last batch: they arrive before any
-    /// is checked, so a call that fails still says what each partition
+    /// `(index into inputs, the worker's answer)`.
+    pub answers: Vec<(usize, Value)>,
+    /// One per invocation, if [`Settings::return_stats`](crate::Settings::return_stats).
+    pub invocation_stats: Vec<Record<InvocationStats>>,
+    /// One per dispatcher, all in the last batch: they arrive before any
+    /// is checked, so a call that fails still says what each dispatcher
     /// did.
-    pub dispatchers: Vec<Record<Response>>,
+    pub dispatcher_stats: Vec<Record<DispatcherStats>>,
 }
 
 impl Batch {
     fn is_empty(&self) -> bool {
         self.done == 0
-            && self.outputs.is_empty()
-            && self.invocations.is_empty()
-            && self.dispatchers.is_empty()
+            && self.answers.is_empty()
+            && self.invocation_stats.is_empty()
+            && self.dispatcher_stats.is_empty()
     }
 }
 
-/// A dispatcher's own record, stamped with the call it belongs to.
+/// A record, stamped with the call it belongs to.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct Record<T> {
+    /// The record itself.
     #[serde(flatten)]
     pub record: T,
+    /// Which call of its session, counting from 0.
     pub call: usize,
     /// When that call began, as epoch seconds.
     pub call_start: f64,
@@ -79,7 +85,7 @@ pub type Run = BoxStream<'static, Result<Batch, Error>>;
 /// Refuses, with nothing invoked, a call that could not have worked: a
 /// split no dispatcher could carry, or a partition over Lambda's
 /// request limit.
-pub fn dispatch(
+pub(crate) fn dispatch(
     transport: Arc<dyn Transport>,
     call: Call,
     inputs: Vec<Value>,
@@ -148,17 +154,17 @@ pub fn dispatch(
                     let place = |index: usize| partition + index * count;
                     let batch = Batch {
                         done: completed.done,
-                        outputs: completed
+                        answers: completed
                             .outputs
                             .into_iter()
                             .map(|output| (place(output.index), output.response))
                             .collect(),
-                        invocations: completed
+                        invocation_stats: completed
                             .stats
                             .into_iter()
                             .map(|stat| stamp.on(Stat { index: place(stat.index), ..stat }))
                             .collect(),
-                        dispatchers: Vec::new(),
+                        dispatcher_stats: Vec::new(),
                     };
                     if !batch.is_empty() {
                         yield batch;
@@ -173,7 +179,7 @@ pub fn dispatch(
             .map(|result| result.expect("a partition's stream ends with its result or an error"))
             .collect();
         yield Batch {
-            dispatchers: responses.iter().cloned().map(|r| stamp.on(r)).collect(),
+            dispatcher_stats: responses.iter().cloned().map(|r| stamp.on(r)).collect(),
             ..Batch::default()
         };
         for (partition, response) in responses.iter().enumerate() {

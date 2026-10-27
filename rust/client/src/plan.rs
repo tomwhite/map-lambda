@@ -16,7 +16,7 @@ fn carried(local: bool) -> usize {
 }
 
 /// The fewest dispatchers that can hold `concurrency` in flight.
-pub fn dispatchers_for(concurrency: usize, local: bool) -> usize {
+pub(crate) fn dispatchers_for(concurrency: usize, local: bool) -> usize {
     concurrency.div_ceil(carried(local)).max(1)
 }
 
