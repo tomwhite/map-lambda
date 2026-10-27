@@ -17,15 +17,15 @@ from map_lambda import Lambdas
 from .fakes import (
     RecordingClient,
     completed,
-    coordinator_body,
-    coordinator_result,
+    dispatcher_body,
+    dispatcher_result,
     lines,
 )
 
 
 def _session(client: Any, **settings: Any) -> Lambdas:
     """A `Lambdas` whose Lambda client answers without invoking anything."""
-    lambdas = Lambdas(**{"coordinators": 1, "concurrency": 4, **settings})
+    lambdas = Lambdas(**{"dispatchers": 1, "concurrency": 4, **settings})
     lambdas._client = client
     return lambdas
 
@@ -42,7 +42,7 @@ def _answers(client: Any, inputs: list[Any], **settings: Any) -> list[tuple[int,
 
 def test_every_answer_carries_the_position_of_its_input_across_partitions():
     """
-    Partitions are strided, so a coordinator's own 0, 1, 2 are inputs
+    Partitions are strided, so a dispatcher's own 0, 1, 2 are inputs
     0, 2, 4 - and unordered yields are joinable only by that number.
     """
     client = RecordingClient(
@@ -52,36 +52,36 @@ def test_every_answer_carries_the_position_of_its_input_across_partitions():
                     done=3,
                     outputs=[{"index": 0, "response": "a"}, {"index": 2, "response": "e"}],
                 ),
-                {"Result": coordinator_result(3)},
+                {"Result": dispatcher_result(3)},
             ],
             [
                 completed(done=2, outputs=[{"index": 1, "response": "d"}]),
-                {"Result": coordinator_result(2)},
+                {"Result": dispatcher_result(2)},
             ],
         ]
     )
 
-    answers = _answers(client, list("abcde"), coordinators=2, concurrency=8)
+    answers = _answers(client, list("abcde"), dispatchers=2, concurrency=8)
 
     assert sorted(answers) == [(0, "a"), (3, "d"), (4, "e")]
 
 
 def test_an_answer_reaches_the_caller_before_the_run_has_finished():
     """
-    The coordinator's result frame is not written until the test has been
+    The dispatcher's result frame is not written until the test has been
     given the answer, so an implementation that collected first would
     never get here.
     """
     client = RecordingClient()
     body = client.respond()
-    body.write(coordinator_body(completed(done=1, outputs=[{"index": 0, "response": "early"}])))
+    body.write(dispatcher_body(completed(done=1, outputs=[{"index": 0, "response": "early"}])))
 
     async def drain() -> list[tuple[int, Any]]:
         lambdas = _session(client)
         answers = []
         async for answer in lambdas.map_unordered("worker", ["a"], input_key="i"):
             answers.append(answer)
-            body.write(lines({"Result": coordinator_result(1)}))
+            body.write(lines({"Result": dispatcher_result(1)}))
             body.close()
         return answers
 
@@ -102,7 +102,7 @@ def test_a_losing_run_keeps_the_answers_it_had_already_handed_over():
                 completed(done=1, outputs=[{"index": 0, "response": "a"}]),
                 completed(done=1, outputs=[{"index": 1, "response": "b"}], first_error="boom"),
                 {
-                    "Result": coordinator_result(
+                    "Result": dispatcher_result(
                         2, dispatched=3, transport_errors=1, first_error="boom"
                     )
                 },
@@ -130,7 +130,7 @@ def test_an_input_whose_worker_returned_nothing_is_never_yielded():
         [
             [
                 completed(done=2, outputs=[{"index": 1, "response": "b"}]),
-                {"Result": coordinator_result(2)},
+                {"Result": dispatcher_result(2)},
             ]
         ]
     )
@@ -138,10 +138,10 @@ def test_an_input_whose_worker_returned_nothing_is_never_yielded():
     assert _answers(client, ["a", "b"]) == [(1, "b")]
 
 
-def test_stopping_early_tears_down_the_coordinators_still_running():
+def test_stopping_early_tears_down_the_dispatchers_still_running():
     client = RecordingClient()
     body = client.respond()
-    body.write(coordinator_body(completed(done=1, outputs=[{"index": 0, "response": "first"}])))
+    body.write(dispatcher_body(completed(done=1, outputs=[{"index": 0, "response": "first"}])))
 
     async def take_one() -> None:
         lambdas = _session(client)
@@ -173,7 +173,7 @@ def test_an_abandoned_run_raises_nothing_however_it_went():
             [
                 completed(done=1, outputs=[{"index": 0, "response": "first"}]),
                 {
-                    "Result": coordinator_result(
+                    "Result": dispatcher_result(
                         1, dispatched=2, transport_errors=1, first_error="boom"
                     )
                 },

@@ -1,4 +1,4 @@
-//! Getting a request to a coordinator and its body back.
+//! Getting a request to a dispatcher and its body back.
 //!
 //! Behind a trait so that a test - or a Python fake - can answer with
 //! frames it wrote itself.
@@ -19,16 +19,16 @@ use std::time::Duration;
 /// A local `cargo lambda watch` server, started from rust/.
 pub const LOCAL_ENDPOINT_URL: &str = "http://localhost:9000";
 
-/// Lambda's maximum function duration: a coordinator's stream can stay
+/// Lambda's maximum function duration: a dispatcher's stream can stay
 /// open that long.
-const COORDINATOR_READ_TIMEOUT: Duration = Duration::from_secs(900);
+const DISPATCHER_READ_TIMEOUT: Duration = Duration::from_secs(900);
 
-/// A coordinator's response body, as it arrives.
+/// A dispatcher's response body, as it arrives.
 pub type Chunks = BoxStream<'static, Result<Vec<u8>, Error>>;
 
-/// Somewhere to send a coordinator request.
+/// Somewhere to send a dispatcher request.
 pub trait Transport: Send + Sync {
-    /// Invoke one coordinator and hand back its response body.
+    /// Invoke one dispatcher and hand back its response body.
     fn stream<'a>(
         &'a self,
         function: &'a str,
@@ -55,11 +55,11 @@ impl Lambda {
     /// `endpoint_url` is set: the emulator does not check them, but the
     /// SDK will not sign without them.
     pub async fn connect(endpoint_url: Option<&str>) -> Self {
-        // Retries are the coordinator's, where they are counted; one
+        // Retries are the dispatcher's, where they are counted; one
         // underneath would be an invocation nothing counted.
         let loader: ConfigLoader =
             aws_config::defaults(BehaviorVersion::latest()).retry_config(RetryConfig::disabled());
-        let timeouts = TimeoutConfig::builder().read_timeout(COORDINATOR_READ_TIMEOUT);
+        let timeouts = TimeoutConfig::builder().read_timeout(DISPATCHER_READ_TIMEOUT);
         let config = match endpoint_url {
             None => loader.timeout_config(timeouts.build()),
             Some(url) => loader
@@ -125,7 +125,7 @@ impl Lambda {
             .await
             .map_err(|e| Error::Transport(error_chain(&e)))?;
         if let Some(failed) = output.function_error {
-            return Err(Error::CoordinatorFailed(failed));
+            return Err(Error::DispatcherFailed(failed));
         }
         let body = output.payload.map(Blob::into_inner).unwrap_or_default();
         Ok(Box::pin(futures::stream::once(async move { Ok(body) })))

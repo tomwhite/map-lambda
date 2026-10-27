@@ -1,4 +1,4 @@
-//! The Lambda clients a coordinator invokes workers through.
+//! The Lambda clients a dispatcher invokes workers through.
 
 use aws_config::retry::RetryConfig;
 use aws_credential_types::Credentials;

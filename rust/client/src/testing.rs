@@ -8,7 +8,7 @@ use futures::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-/// Answers each coordinator invocation, in order, with a body the test
+/// Answers each dispatcher invocation, in order, with a body the test
 /// writes, and records what it was sent.
 #[derive(Default)]
 pub struct Stub {
@@ -18,7 +18,7 @@ pub struct Stub {
 }
 
 impl Stub {
-    /// The body the next coordinator invocation answers with, delivered a
+    /// The body the next dispatcher invocation answers with, delivered a
     /// chunk per send and ended by dropping the sender. It reports
     /// `is_closed` once the client has stopped reading.
     pub fn respond(&self) -> UnboundedSender<Vec<u8>> {
@@ -27,7 +27,7 @@ impl Stub {
         tx
     }
 
-    /// Every coordinator request, as sent.
+    /// Every dispatcher request, as sent.
     pub fn requests(&self) -> Vec<Vec<u8>> {
         self.requests.lock().expect("unpoisoned").clone()
     }

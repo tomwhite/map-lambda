@@ -5,23 +5,23 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("a coordinator run needs at least one coordinator")]
-    NoCoordinators,
+    #[error("a dispatcher run needs at least one dispatcher")]
+    NoDispatchers,
 
-    #[error("concurrency {concurrency} is too small to split {coordinators} ways")]
+    #[error("concurrency {concurrency} is too small to split {dispatchers} ways")]
     ConcurrencyTooSmall {
         concurrency: usize,
-        coordinators: usize,
+        dispatchers: usize,
     },
 
     #[error(
-        "concurrency {concurrency} over {coordinators} coordinator(s) is {widest} in flight \
+        "concurrency {concurrency} over {dispatchers} dispatcher(s) is {widest} in flight \
          each, more than the {carries} {holder} can carry: it would queue the rest and the run \
-         would just be slow. Use at least {need} coordinators, or lower concurrency"
+         would just be slow. Use at least {need} dispatchers, or lower concurrency"
     )]
     TooMuchInFlight {
         concurrency: usize,
-        coordinators: usize,
+        dispatchers: usize,
         widest: usize,
         carries: usize,
         holder: &'static str,
@@ -30,7 +30,7 @@ pub enum Error {
 
     #[error(
         "partition {partition} is {:.1} MiB, over Lambda's {} MiB request limit: it would be \
-         refused as RequestTooLargeException with nothing run. Use at least {need} coordinators, \
+         refused as RequestTooLargeException with nothing run. Use at least {need} dispatchers, \
          or send smaller inputs",
         *bytes as f64 / 1024.0 / 1024.0,
         MAX_REQUEST_BYTES / 1024 / 1024
@@ -45,7 +45,7 @@ pub enum Error {
     InvocationFailed(String),
 
     #[error(
-        "coordinator {req_id} reported {} failed invocation(s) ({function_errors} function, \
+        "dispatcher {req_id} reported {} failed invocation(s) ({function_errors} function, \
          {transport_errors} transport): {}",
         function_errors + transport_errors,
         first_error.as_deref().unwrap_or("None")
@@ -58,7 +58,7 @@ pub enum Error {
     },
 
     #[error(
-        "coordinator {req_id} completed {succeeded} of {expected} invocation(s) in its partition \
+        "dispatcher {req_id} completed {succeeded} of {expected} invocation(s) in its partition \
          with no error reported"
     )]
     PartitionShort {
@@ -68,15 +68,15 @@ pub enum Error {
     },
 
     #[error(
-        "coordinator stream ended with no result frame - it stopped partway through its \
+        "dispatcher stream ended with no result frame - it stopped partway through its \
          partition, so some of its work was never done"
     )]
     NoResult,
 
-    #[error("coordinator invocation failed: {0}")]
-    CoordinatorFailed(String),
+    #[error("dispatcher invocation failed: {0}")]
+    DispatcherFailed(String),
 
-    #[error("coordinator failed mid-stream: {0}")]
+    #[error("dispatcher failed mid-stream: {0}")]
     FailedMidStream(String),
 
     #[error("could not reach Lambda: {0}")]
@@ -100,7 +100,7 @@ impl Error {
     pub fn is_refusal(&self) -> bool {
         matches!(
             self,
-            Self::NoCoordinators
+            Self::NoDispatchers
                 | Self::ConcurrencyTooSmall { .. }
                 | Self::TooMuchInFlight { .. }
                 | Self::RequestTooLarge { .. }

@@ -98,7 +98,7 @@ There are several differences between map-lambda and Lithops, but the main ones 
 
 - **Significantly smaller image size.** The Rust images used by map-lambda are a lot smaller than the Python images used in Lithops. For example, the one used in the rechunk was around 4MB compared to 400MB for the one Cubed used with Lithops.
 - **No object store for coordination.** Lithops sends the pickled function, inputs and outputs through object storage, which adds latency to the client and to worker functions. Map-lambda does not support dynamic functions at all, and serialises the inputs and outputs directly over the HTTP calls to the lambda function.
-- **Coordination in AWS.** A Lithops client is very chatty, since it launches all of the workers from the client, and polls object storage for new results. Map-lambda, on the other hand, uses *coordinator* lambdas that are deployed within AWS to manage the fan out with the thousands of worker lambdas, and the client only has to manage a handful of persistent HTTP connections with the coordinators. This architecture is illustrated in the following diagram:
+- **Coordination in AWS.** A Lithops client is very chatty, since it launches all of the workers from the client, and polls object storage for new results. Map-lambda, on the other hand, uses *dispatcher* lambdas that are deployed within AWS to manage the fan out with the thousands of worker lambdas, and the client only has to manage a handful of persistent HTTP connections with the dispatchers. This architecture is illustrated in the following diagram:
 
 ![](../../assets/map-lambda-architecture.svg)
 
@@ -109,3 +109,5 @@ Rechunking serves as a challenging use case for map-lambda, since it is a very I
 Some ideas include file conversion to Zarr, resampling, and blockwise operations - anything where the operation is known ahead of time and can be implemented in Rust.
 
 If you have a possible use case you'd like to discuss, please reach out or [start a discussion](https://github.com/tomwhite/map-lambda/discussions) on GitHub.
+
+*Update (27 October 2026): changed 'coordinator' to 'dispatcher' following change in the code.*

@@ -1521,7 +1521,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "map-lambda-coordinator"
+name = "map-lambda-dispatcher"
 version = "0.1.0"
 dependencies = [
  "aws-config",

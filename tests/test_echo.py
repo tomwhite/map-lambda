@@ -15,7 +15,7 @@ async def echo(
     **settings: Any,
 ):
 
-    async with Lambdas(coordinator_stats=[], invocation_stats=[], **settings) as lambdas:
+    async with Lambdas(dispatcher_stats=[], invocation_stats=[], **settings) as lambdas:
         constant_args: dict[str, Any] = {
             "path": path,
             "timing_map": timing_map,
@@ -27,7 +27,7 @@ async def echo(
                 "echo", i, input_key="i", constant_args=constant_args
             )
         ]
-        return outputs, lambdas.coordinator_stats, lambdas.invocation_stats
+        return outputs, lambdas.dispatcher_stats, lambdas.invocation_stats
 
 
 @pytest.mark.lambda_integration
@@ -38,7 +38,7 @@ def test_echo(tmp_path):
         echo(path, timing_map, list(range(3)), endpoint_url=LOCAL_ENDPOINT_URL)
     )
 
-    # a real coordinator finishes them in whatever order they come back
+    # a real dispatcher finishes them in whatever order they come back
     assert sorted(answer["i"] for answer in outputs) == [0, 1, 2]
 
     assert len(partitions) == 1
@@ -55,13 +55,13 @@ def test_echo(tmp_path):
 
 
 @pytest.mark.lambda_integration
-def test_a_real_coordinator_sends_every_field_this_side_reads(tmp_path):
+def test_a_real_dispatcher_sends_every_field_this_side_reads(tmp_path):
     """
     The one check that spans both languages.
 
     Both Rust ends share rust/protocol, but `stats.py`, `timeline.py` and
     every caller read these records by key, so a rename there parses fine
-    and goes missing quietly. The sets are pinned against a coordinator
+    and goes missing quietly. The sets are pinned against a dispatcher
     that really ran.
     """
     _, partitions, records = asyncio.run(

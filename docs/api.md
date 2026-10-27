@@ -15,7 +15,7 @@
 ::: map_lambda.stats
     options:
       members:
-        - summarize_coordinators
+        - summarize_dispatchers
         - summarize_invocations
         - write_jsonl
         - read_jsonl

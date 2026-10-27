@@ -1,11 +1,11 @@
 [package]
-# Not `coordinator`: a client project's own crate uses that name
-name = "map-lambda-coordinator"
+# Not `dispatcher`: a client project's own crate may use that name
+name = "map-lambda-dispatcher"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "coordinator"
+name = "dispatcher"
 path = "src/main.rs"
 
 # 900s is Lambda's maximum, and what the client's read timeout expects.

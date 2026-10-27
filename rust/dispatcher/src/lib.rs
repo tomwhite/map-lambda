@@ -1,7 +1,7 @@
-//! A coordinator: dispatches one partition of a call's inputs from inside
-//! Lambda.
+//! A dispatcher: fans one partition of a call's inputs out to workers from
+//! inside Lambda.
 //!
-//! A coordinator is generic over workers, it is told a function name, a payload
+//! A dispatcher is generic over workers, it is told a function name, a payload
 //! template and a list of inputs by the client.
 //!
 //! - `clients` - the Lambda clients, and how many there have to be.
@@ -19,7 +19,7 @@ mod handler;
 mod invoke;
 mod tally;
 
-/// Serve the coordinator on the Lambda runtime, until the runtime stops it.
+/// Serve the dispatcher on the Lambda runtime, until the runtime stops it.
 pub async fn run() -> Result<(), Error> {
     tracing::init_default_subscriber();
 

@@ -352,7 +352,7 @@ mod tests {
         assert!(opening.is_empty());
     }
 
-    /// A failed worker does not stop the partition: the coordinator
+    /// A failed worker does not stop the partition: the dispatcher
     /// counts it and dispatches on, and the client is what raises.
     #[tokio::test]
     async fn a_failed_invocation_is_counted_rather_than_returned() {

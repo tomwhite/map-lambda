@@ -27,7 +27,7 @@ class Batch:
     done: int
     answers: list[tuple[int, Any]]
     invocation_stats: list[dict[str, Any]]
-    coordinator_stats: list[dict[str, Any]]
+    dispatcher_stats: list[dict[str, Any]]
 
 @final
 class Run(AsyncIterator[Batch]):
@@ -42,10 +42,10 @@ def dispatch(
     inputs: list[Any],
     *,
     constant_args: dict[str, Any],
-    coordinator_function: str,
+    dispatcher_function: str,
     target_function: str,
     input_key: str,
-    coordinators: int | None,
+    dispatchers: int | None,
     concurrency: int,
     retries: int,
     endpoint_url: str | None,
