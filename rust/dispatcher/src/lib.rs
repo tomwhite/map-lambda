@@ -12,7 +12,7 @@
 //! ```
 #![warn(missing_docs)]
 
-// - `clients` - the Lambda clients, and how many there have to be.
+// - `lambda_clients` - the Lambda clients, and how many there have to be.
 // - `invoke` - one worker invocation, with retries.
 // - `tally` - what the partition has come to so far.
 // - `dispatch` - the loop that turns inputs into invocations.
@@ -21,10 +21,10 @@
 use lambda_runtime::{run as lambda_run, service_fn, tracing, Error};
 use map_lambda_protocol as protocol;
 
-mod clients;
 mod dispatch;
 mod handler;
 mod invoke;
+mod lambda_clients;
 mod tally;
 
 /// Serve the dispatcher on the Lambda runtime, until the runtime stops it.

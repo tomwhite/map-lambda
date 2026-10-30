@@ -1,4 +1,4 @@
-//! What can go wrong between asking for a run and getting its answers.
+//! What can go wrong between asking for a call and getting its outputs.
 
 use map_lambda_protocol::MAX_REQUEST_BYTES;
 use thiserror::Error;
@@ -9,7 +9,7 @@ use thiserror::Error;
 // Each variant's message documents it.
 #[allow(missing_docs)]
 pub enum Error {
-    #[error("a dispatcher run needs at least one dispatcher")]
+    #[error("a call needs at least one dispatcher")]
     NoDispatchers,
 
     #[error("concurrency {concurrency} is too small to split {dispatchers} ways")]
@@ -20,7 +20,7 @@ pub enum Error {
 
     #[error(
         "concurrency {concurrency} over {dispatchers} dispatcher(s) is {widest} in flight \
-         each, more than the {carries} {holder} can carry: it would queue the rest and the run \
+         each, more than the {carries} {holder} can carry: it would queue the rest and the call \
          would just be slow. Use at least {need} dispatchers, or lower concurrency"
     )]
     TooMuchInFlight {
@@ -72,10 +72,10 @@ pub enum Error {
     },
 
     #[error(
-        "dispatcher stream ended with no result frame - it stopped partway through its \
+        "dispatcher stream ended with no summary frame - it stopped partway through its \
          partition, so some of its work was never done"
     )]
-    NoResult,
+    NoSummary,
 
     #[error("dispatcher invocation failed: {0}")]
     DispatcherFailed(String),
@@ -99,7 +99,7 @@ impl Error {
         move |source| Self::Json { context, source }
     }
 
-    /// Whether the run was refused before anything was invoked, because
+    /// Whether the call was refused before anything was invoked, because
     /// of what it was asked to do rather than anything that happened.
     pub fn is_refusal(&self) -> bool {
         matches!(

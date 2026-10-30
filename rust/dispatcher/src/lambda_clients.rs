@@ -3,9 +3,9 @@
 use aws_config::retry::RetryConfig;
 use aws_credential_types::Credentials;
 use aws_sdk_lambda::config::Region;
-use aws_sdk_lambda::Client;
+use aws_sdk_lambda::Client as LambdaClient;
 use aws_smithy_http_client::{tls, Builder as HttpBuilder};
-use map_lambda_protocol::MAX_HTTP_CLIENTS;
+use map_lambda_protocol::MAX_LAMBDA_CLIENTS;
 use std::borrow::Cow;
 use tokio::sync::OnceCell;
 
@@ -14,16 +14,16 @@ use tokio::sync::OnceCell;
 ///
 /// The SDK's retries are disabled and re-implemented in
 /// `invoke_with_retries`, so that every re-send is counted.
-static CLIENTS: OnceCell<Vec<Client>> = OnceCell::const_new();
+static CLIENTS: OnceCell<Vec<LambdaClient>> = OnceCell::const_new();
 
-async fn clients() -> &'static [Client] {
+async fn shared() -> &'static [LambdaClient] {
     CLIENTS
         .get_or_init(|| async {
             let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
                 .retry_config(RetryConfig::disabled())
                 .load()
                 .await;
-            (0..MAX_HTTP_CLIENTS)
+            (0..MAX_LAMBDA_CLIENTS)
                 .map(|_| {
                     // A fresh HTTP client each, so each has its own
                     // connection pool.
@@ -32,7 +32,7 @@ async fn clients() -> &'static [Client] {
                             tls::rustls_provider::CryptoMode::AwsLc,
                         ))
                         .build_https();
-                    Client::from_conf(
+                    LambdaClient::from_conf(
                         aws_sdk_lambda::config::Builder::from(&config)
                             .http_client(http)
                             .build(),
@@ -47,7 +47,7 @@ async fn clients() -> &'static [Client] {
 ///
 /// The emulator does not check credentials, but the SDK will not sign
 /// without them.
-async fn local_client(endpoint_url: &str) -> Client {
+async fn local_client(endpoint_url: &str) -> LambdaClient {
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(Region::new("us-east-1"))
         .credentials_provider(Credentials::new("test", "test", None, None, "local"))
@@ -55,23 +55,23 @@ async fn local_client(endpoint_url: &str) -> Client {
         .endpoint_url(endpoint_url)
         .load()
         .await;
-    Client::new(&config)
+    LambdaClient::new(&config)
 }
 
 /// The clients one request dispatches over, and whether the shared set
-/// had to be built - which is what `cold` means in a response.
+/// had to be built - which is what `cold` means in the stats.
 ///
 /// Borrowed from `CLIENTS` for a deployed run, so a warm environment
 /// reuses its connection pools, and owned for a local one, which gets a
 /// throwaway.
 pub(crate) async fn for_request(
     endpoint_url: Option<&str>,
-) -> (Cow<'static, [Client]>, Option<bool>) {
+) -> (Cow<'static, [LambdaClient]>, Option<bool>) {
     match endpoint_url {
         Some(url) => (Cow::Owned(vec![local_client(url).await]), None),
         None => {
             let cold = CLIENTS.get().is_none();
-            (Cow::Borrowed(clients().await), Some(cold))
+            (Cow::Borrowed(shared().await), Some(cold))
         }
     }
 }

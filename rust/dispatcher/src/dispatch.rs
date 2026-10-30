@@ -5,9 +5,9 @@
 //! `ReportCallback`, so a test can record the frames instead.
 
 use crate::invoke::{invoke_with_retries, payload_for};
-use crate::protocol::{connections_for, Completed, Request, Response};
+use crate::protocol::{connections_for, Completed, DispatcherStats, Request};
 use crate::tally::{Return, Tally};
-use aws_sdk_lambda::Client;
+use aws_sdk_lambda::Client as LambdaClient;
 use futures::stream::StreamExt;
 use lambda_runtime::Error;
 use std::time::{Duration, Instant};
@@ -23,30 +23,30 @@ pub(crate) trait ReportCallback {
     async fn completed(&mut self, completed: Completed) -> Result<(), Error>;
 }
 
-/// Run one partition: invoke `target_function` once per input group, with
-/// `concurrency` in flight, and answer with what became of them.
+/// Run one partition: invoke `worker_function` once per input, with
+/// `max_in_flight` in flight, and report what became of them.
 pub(crate) async fn dispatch<S: ReportCallback>(
     request: Request,
     req_id: String,
-    clients: &[Client],
+    lambda_clients: &[LambdaClient],
     cold: Option<bool>,
     callback: &mut S,
-) -> Result<Response, Error> {
+) -> Result<DispatcherStats, Error> {
     let Request {
-        target_function,
-        template,
+        worker_function,
+        constant_args,
         inputs,
         input_key,
-        concurrency,
+        max_in_flight,
         retries,
         return_stats,
         return_outputs,
-        // Already spent: the caller built the clients from it.
+        // Already spent: the caller built the Lambda clients from it.
         endpoint_url: _,
     } = request;
 
-    // A local run has one client.
-    let connections = connections_for(concurrency).min(clients.len());
+    // A local run has one Lambda client.
+    let connections = connections_for(max_in_flight).min(lambda_clients.len());
     let dispatched = inputs.len();
 
     let mut tally = Tally::returning(Return {
@@ -63,20 +63,20 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     // The invocations, started only as the loop below polls them.
     let mut results = futures::stream::iter(inputs.into_iter().enumerate())
         .map(|(i, input)| {
-            let body = payload_for(&template, &input_key, input);
-            let client = &clients[i % connections];
-            let function_name: &str = &target_function;
+            let body = payload_for(&constant_args, &input_key, input);
+            let client = &lambda_clients[i % connections];
+            let worker: &str = &worker_function;
             async move {
-                let attempted = invoke_with_retries(client, function_name, body, retries).await;
+                let invocation = invoke_with_retries(client, worker, body, retries).await;
                 // `buffer_unordered` yields in completion order.
-                (i, attempted)
+                (i, invocation)
             }
         })
-        .buffer_unordered(concurrency);
+        .buffer_unordered(max_in_flight);
 
     // Each invocation as it finishes, reporting to the callback on a timer.
-    while let Some((index, attempted)) = results.next().await {
-        tally.observe(index, attempted);
+    while let Some((index, invocation)) = results.next().await {
+        tally.observe(index, invocation);
         if last_report.elapsed() >= REPORT_INTERVAL {
             callback.completed(tally.take_completed()).await?;
             last_report = Instant::now();
@@ -90,7 +90,7 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     }
 
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    Ok(tally.into_response(req_id, dispatched, cold, connections, elapsed_ms))
+    Ok(tally.into_stats(req_id, dispatched, cold, connections, elapsed_ms))
 }
 
 #[cfg(test)]
@@ -100,7 +100,7 @@ mod tests {
     use aws_config::retry::RetryConfig;
     use aws_credential_types::Credentials;
     use aws_sdk_lambda::config::Region;
-    use aws_sdk_lambda::Client;
+    use aws_sdk_lambda::Client as LambdaClient;
     use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
     use lambda_runtime::Error;
@@ -114,9 +114,9 @@ mod tests {
     }
 
     impl Recorder {
-        /// The answers across every frame, which is where a client
+        /// The outputs across every frame, which is where a client
         /// finds them: nothing repeats them at the end.
-        fn answers(&self) -> Vec<Value> {
+        fn outputs(&self) -> Vec<Value> {
             self.frames
                 .iter()
                 .flat_map(|f| &f.outputs)
@@ -170,7 +170,7 @@ mod tests {
             .expect("a response")
     }
 
-    fn replaying(responses: Vec<http::Response<SdkBody>>) -> Vec<Client> {
+    fn replaying(responses: Vec<http::Response<SdkBody>>) -> Vec<LambdaClient> {
         let request = || {
             http::Request::builder()
                 .uri("https://lambda.eu-west-1.amazonaws.com/2015-03-31/functions/w/invocations")
@@ -190,16 +190,16 @@ mod tests {
             .retry_config(RetryConfig::disabled())
             .http_client(http_client)
             .build();
-        vec![Client::from_conf(config)]
+        vec![LambdaClient::from_conf(config)]
     }
 
     fn a_request(inputs: usize) -> Request {
         serde_json::from_value(json!({
-            "target_function": "echo",
-            "template": {"store": "s3://bucket/data"},
+            "worker_function": "echo",
+            "constant_args": {"store": "s3://bucket/data"},
             "inputs": (0..inputs).map(|i| json!([[i, 0]])).collect::<Vec<_>>(),
             "input_key": "coords",
-            "concurrency": 2,
+            "max_in_flight": 2,
             "retries": 0,
             "return_stats": true,
             "return_outputs": true,
@@ -211,66 +211,66 @@ mod tests {
     /// output frames at all, not empty ones and not a labelled entry
     /// each saying null.
     #[tokio::test]
-    async fn a_worker_that_answers_nothing_sends_no_frames() {
-        let clients = replaying(vec![worker_silent(), worker_silent(), worker_silent()]);
+    async fn a_worker_that_returns_nothing_sends_no_frames() {
+        let lambda_clients = replaying(vec![worker_silent(), worker_silent(), worker_silent()]);
         let mut callback = Recorder::default();
 
         dispatch(
             a_request(3),
             "c-0".into(),
-            &clients,
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
         .await
         .expect("dispatched");
 
-        assert!(callback.answers().is_empty(), "{:?}", callback.answers());
+        assert!(callback.outputs().is_empty(), "{:?}", callback.outputs());
     }
 
-    /// Silence is not failure: the partition still ran, and the result
+    /// Silence is not failure: the partition still ran, and the summary
     /// frame says so. Nothing downstream should read an empty `outputs`
     /// as work that did not happen - `check` reads the counts.
     #[tokio::test]
     async fn a_silent_worker_still_counts_as_succeeded() {
-        let clients = replaying(vec![worker_silent(), worker_silent()]);
+        let lambda_clients = replaying(vec![worker_silent(), worker_silent()]);
         let mut callback = Recorder::default();
 
-        let response = dispatch(
+        let stats = dispatch(
             a_request(2),
             "c-0".into(),
-            &clients,
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
         .await
         .expect("dispatched");
 
-        assert_eq!(response.succeeded, 2);
-        assert_eq!(response.function_errors, 0);
+        assert_eq!(stats.succeeded, 2);
+        assert_eq!(stats.function_errors, 0);
     }
 
     /// The worker's own body, verbatim, against the position of the
-    /// input it answers - which is all the client needs to line answers
+    /// input it came from - which is all the client needs to line outputs
     /// up, and all that identifies one.
     #[tokio::test]
-    async fn answers_carry_the_workers_body_against_their_inputs_position() {
-        let clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
+    async fn outputs_carry_the_workers_body_against_their_inputs_position() {
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
         let mut callback = Recorder::default();
 
         dispatch(
             a_request(3),
             "c-0".into(),
-            &clients,
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
         .await
         .expect("dispatched");
 
-        let answers = callback.answers();
-        assert_eq!(answers.len(), 3);
-        let mut positions: Vec<u64> = answers
+        let outputs = callback.outputs();
+        assert_eq!(outputs.len(), 3);
+        let mut positions: Vec<u64> = outputs
             .iter()
             .map(|a| a["index"].as_u64().expect("an index"))
             .collect();
@@ -278,10 +278,10 @@ mod tests {
         assert_eq!(positions, vec![0, 1, 2]);
         // no envelope added, and no copy of the input sent back
         assert!(
-            answers
+            outputs
                 .iter()
-                .all(|a| a["response"] == json!({"copied": 1}) && a.get("i").is_none()),
-            "{answers:?}"
+                .all(|a| a["value"] == json!({"copied": 1}) && a.get("i").is_none()),
+            "{outputs:?}"
         );
     }
 
@@ -291,13 +291,13 @@ mod tests {
     /// frame.
     #[tokio::test]
     async fn the_last_batch_is_sent_after_the_loop() {
-        let clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
         let mut callback = Recorder::default();
 
         dispatch(
             a_request(3),
             "c-0".into(),
-            &clients,
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
@@ -305,29 +305,29 @@ mod tests {
         .expect("dispatched");
 
         assert_eq!(callback.frames.len(), 2);
-        assert_eq!(callback.frames[1].done, 3);
+        assert_eq!(callback.frames[1].succeeded, 3);
         assert_eq!(callback.frames[1].outputs.len(), 3);
     }
 
     #[tokio::test]
     async fn every_input_becomes_an_invocation_and_is_counted() {
-        let clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
         let mut callback = Recorder::default();
 
-        let response = dispatch(
+        let stats = dispatch(
             a_request(3),
-            "coord-0".into(),
-            &clients,
+            "dispatcher-0".into(),
+            &lambda_clients,
             Some(true),
             &mut callback,
         )
         .await
         .expect("dispatched");
 
-        let record = serde_json::to_value(&response).expect("serializable");
+        let record = serde_json::to_value(&stats).expect("serializable");
         assert_eq!(record["dispatched"], 3);
         assert_eq!(record["succeeded"], 3);
-        assert_eq!(record["req_id"], "coord-0");
+        assert_eq!(record["req_id"], "dispatcher-0");
         assert_eq!(record["cold"], true);
     }
 
@@ -335,13 +335,13 @@ mod tests {
     /// client.
     #[tokio::test]
     async fn an_empty_frame_is_sent_before_any_invocation_lands() {
-        let clients = replaying(vec![worker_ok(), worker_ok()]);
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok()]);
         let mut callback = Recorder::default();
 
         dispatch(
             a_request(2),
-            "coord-0".into(),
-            &clients,
+            "dispatcher-0".into(),
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
@@ -356,20 +356,20 @@ mod tests {
     /// counts it and dispatches on, and the client is what raises.
     #[tokio::test]
     async fn a_failed_invocation_is_counted_rather_than_returned() {
-        let clients = replaying(vec![worker_ok(), worker_failed()]);
+        let lambda_clients = replaying(vec![worker_ok(), worker_failed()]);
         let mut callback = Recorder::default();
 
-        let response = dispatch(
+        let stats = dispatch(
             a_request(2),
-            "coord-0".into(),
-            &clients,
+            "dispatcher-0".into(),
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
         .await
         .expect("dispatched");
 
-        let record = serde_json::to_value(&response).expect("serializable");
+        let record = serde_json::to_value(&stats).expect("serializable");
         assert_eq!(record["succeeded"], 1);
         assert_eq!(record["function_errors"], 1);
         assert!(record["first_error"]
@@ -379,18 +379,18 @@ mod tests {
     }
 
     /// A failure can be the whole of a frame: nothing succeeded
-    /// alongside it, and a failure carries neither an answer nor a
+    /// alongside it, and a failure carries neither an output nor a
     /// record. `is_empty` deciding there was nothing to send would drop
     /// it, and the client would go back to learning at the end.
     #[tokio::test]
     async fn a_frame_carrying_only_a_failure_is_still_sent() {
-        let clients = replaying(vec![worker_failed()]);
+        let lambda_clients = replaying(vec![worker_failed()]);
         let mut callback = Recorder::default();
 
         dispatch(
             a_request(1),
-            "coord-0".into(),
-            &clients,
+            "dispatcher-0".into(),
+            &lambda_clients,
             Some(false),
             &mut callback,
         )
@@ -406,12 +406,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_callback_that_fails_stops_the_partition() {
-        let clients = replaying(vec![worker_ok()]);
+        let lambda_clients = replaying(vec![worker_ok()]);
 
         let result = dispatch(
             a_request(1),
-            "coord-0".into(),
-            &clients,
+            "dispatcher-0".into(),
+            &lambda_clients,
             Some(false),
             &mut Gone,
         )

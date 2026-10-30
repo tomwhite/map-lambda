@@ -1,15 +1,14 @@
 //! `map_lambda._native`: the Rust client, as Python sees it.
 //!
-//! - `connect` - a `Client` for real Lambda or a local `cargo lambda watch`.
+//! - `connect` - an `Invoker` for real Lambda or a local `cargo lambda watch`.
 //! - `Stub` - a stand-in for Lambda, for tests.
-//! - `Session` - a `map_lambda_client::Lambdas` through either: its calls,
-//!   as async iterators of `Batch`es, and `invoke`.
+//! - `Session` - a `map_lambda_client::Session` through either: its calls,
+//!   as async iterators of `Batch`es, and `invoke_detached`.
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
 use map_lambda_client::{
-    testing, Error, Lambda, Lambdas, Transport, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION,
-    LOCAL_ENDPOINT_URL,
+    testing, Error, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION, LOCAL_ENDPOINT_URL,
 };
 use map_lambda_protocol::MAX_STREAMS_PER_CONNECTION;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError};
@@ -27,19 +26,19 @@ fn to_py(error: Error) -> PyErr {
     }
 }
 
-/// A Lambda client, for real Lambda or a local `cargo lambda watch`.
+/// An invoker, for real Lambda or a local `cargo lambda watch`.
 #[pyclass(frozen)]
-struct Client(Arc<Lambda>);
+struct Invoker(Arc<dyn map_lambda_client::Invoker>);
 
-/// A `Client` with credentials and region from the environment, or for
+/// An `Invoker` with credentials and region from the environment, or for
 /// the emulator at `endpoint_url`.
 #[pyfunction]
 #[pyo3(signature = (endpoint_url=None))]
 fn connect(py: Python<'_>, endpoint_url: Option<String>) -> PyResult<Bound<'_, PyAny>> {
     future_into_py(py, async move {
-        Ok(Client(Arc::new(
-            Lambda::connect(endpoint_url.as_deref()).await,
-        )))
+        Ok(Invoker(
+            map_lambda_client::connect(endpoint_url.as_deref()).await,
+        ))
     })
 }
 
@@ -58,7 +57,7 @@ impl Stub {
         Self(Arc::default())
     }
 
-    /// The body the next dispatcher invocation answers with.
+    /// The body the next dispatcher invocation responds with.
     fn respond(&self) -> Body {
         Body(self.0.respond())
     }
@@ -73,13 +72,15 @@ impl Stub {
             .collect()
     }
 
-    /// Every `invoke`, as `(function, payload)`.
+    /// Every `invoke_detached`, as `(function_name, payload)`.
     #[getter]
     fn invocations(&self) -> Vec<(String, String)> {
         self.0
             .invoked()
             .into_iter()
-            .map(|(function, payload)| (function, String::from_utf8_lossy(&payload).into()))
+            .map(|(function_name, payload)| {
+                (function_name, String::from_utf8_lossy(&payload).into())
+            })
             .collect()
     }
 }
@@ -108,40 +109,40 @@ impl Body {
     }
 }
 
-fn transport_of(client: &Bound<'_, PyAny>) -> PyResult<Arc<dyn Transport>> {
-    if let Ok(client) = client.cast::<Client>() {
-        return Ok(client.get().0.clone());
+fn invoker_of(invoker: &Bound<'_, PyAny>) -> PyResult<Arc<dyn map_lambda_client::Invoker>> {
+    if let Ok(invoker) = invoker.cast::<Invoker>() {
+        return Ok(invoker.get().0.clone());
     }
-    if let Ok(stub) = client.cast::<Stub>() {
+    if let Ok(stub) = invoker.cast::<Stub>() {
         return Ok(stub.get().0.clone());
     }
     Err(PyTypeError::new_err(format!(
-        "expected a Client or a Stub, not {}",
-        client.get_type().name()?
+        "expected an Invoker or a Stub, not {}",
+        invoker.get_type().name()?
     )))
 }
 
 /// What arrived since the last batch: see `map_lambda_client::Batch`.
 #[pyclass(frozen, get_all)]
 struct Batch {
-    done: usize,
-    /// `(index, answer)` pairs.
-    answers: Py<PyList>,
+    succeeded: usize,
+    /// `(index, output)` pairs.
+    outputs: Py<PyList>,
     invocation_stats: Py<PyList>,
     dispatcher_stats: Py<PyList>,
 }
 
 impl Batch {
     fn from_rust(py: Python<'_>, batch: map_lambda_client::Batch) -> PyResult<Self> {
-        let answers = PyList::empty(py);
-        for (index, answer) in batch.answers {
-            let answer: Value = serde_json::from_str(answer.get())
-                .map_err(|e| PyValueError::new_err(format!("an answer is not JSON: {e}")))?;
-            answers.append((index, pythonize::pythonize(py, &answer)?))?;
+        let outputs = PyList::empty(py);
+        for (index, output) in batch.outputs {
+            let output: Value = serde_json::from_str(output.get())
+                .map_err(|e| PyValueError::new_err(format!("an output is not JSON: {e}")))?;
+            outputs.append((index, pythonize::pythonize(py, &output)?))?;
         }
         Ok(Self {
-            done: batch.done,
-            answers: answers.unbind(),
+            succeeded: batch.succeeded,
+            outputs: outputs.unbind(),
             invocation_stats: records(py, &batch.invocation_stats)?,
             dispatcher_stats: records(py, &batch.dispatcher_stats)?,
         })
@@ -158,31 +159,31 @@ fn records<T: serde::Serialize>(py: Python<'_>, records: &[T]) -> PyResult<Py<Py
 
 /// One call's batches, as an async iterator.
 #[pyclass(frozen)]
-struct Run {
+struct Batches {
     /// Taken by `__anext__` while it waits, and put back with a batch:
-    /// a run that failed or finished is gone, and so is one whose
+    /// a call that failed or finished is gone, and so is one whose
     /// `__anext__` was cancelled.
-    run: Arc<Mutex<Option<map_lambda_client::Run>>>,
+    batches: Arc<Mutex<Option<map_lambda_client::Batches>>>,
 }
 
 #[pymethods]
-impl Run {
+impl Batches {
     fn __aiter__(slf: Py<Self>) -> Py<Self> {
         slf
     }
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let slot = self.run.clone();
+        let slot = self.batches.clone();
         let taken = slot.lock().expect("unpoisoned").take();
         future_into_py(py, async move {
-            let Some(mut run) = taken else {
+            let Some(mut batches) = taken else {
                 return Err(PyStopAsyncIteration::new_err(()));
             };
-            match run.next().await {
+            match batches.next().await {
                 None => Err(PyStopAsyncIteration::new_err(())),
                 Some(Err(error)) => Err(to_py(error)),
                 Some(Ok(batch)) => {
-                    *slot.lock().expect("unpoisoned") = Some(run);
+                    *slot.lock().expect("unpoisoned") = Some(batches);
                     Python::attach(|py| Batch::from_rust(py, batch))
                 }
             }
@@ -191,7 +192,7 @@ impl Run {
 
     /// Tear down whatever dispatchers are still running.
     fn close(&self) {
-        drop(self.run.lock().expect("unpoisoned").take());
+        drop(self.batches.lock().expect("unpoisoned").take());
     }
 }
 
@@ -205,19 +206,19 @@ fn json<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>, what: &str) ->
         .map_err(|e| PyValueError::new_err(format!("{what} are not valid JSON: {e}")))
 }
 
-/// A `map_lambda_client::Lambdas` through a `Client` or a `Stub`.
+/// A `map_lambda_client::Session` through an `Invoker` or a `Stub`.
 ///
-/// Settings come with each call, since a Python `Lambdas` can change them.
+/// Settings come with each call, since a Python `Session` can change them.
 #[pyclass(frozen)]
-struct Session(Mutex<Lambdas>);
+struct Session(Mutex<map_lambda_client::Session>);
 
 #[pymethods]
 impl Session {
     #[new]
-    #[pyo3(signature = (client, endpoint_url=None))]
-    fn new(client: &Bound<'_, PyAny>, endpoint_url: Option<String>) -> PyResult<Self> {
-        Ok(Self(Mutex::new(Lambdas::new(
-            transport_of(client)?,
+    #[pyo3(signature = (invoker, endpoint_url=None))]
+    fn new(invoker: &Bound<'_, PyAny>, endpoint_url: Option<String>) -> PyResult<Self> {
+        Ok(Self(Mutex::new(map_lambda_client::Session::new(
+            invoker_of(invoker)?,
             endpoint_url,
         ))))
     }
@@ -227,13 +228,13 @@ impl Session {
     /// Inputs and constant args go through `json.dumps`, so they are
     /// marshalled exactly as they always were.
     #[pyo3(signature = (
-        function, inputs, *, input_key, constant_args, dispatcher_function, dispatchers,
+        worker_function, inputs, *, input_key, constant_args, dispatcher_function, dispatchers,
         concurrency, retries, return_outputs, return_stats,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn dispatch(
+    fn start(
         &self,
-        function: &str,
+        worker_function: &str,
         inputs: &Bound<'_, PyAny>,
         input_key: &str,
         constant_args: &Bound<'_, PyAny>,
@@ -243,8 +244,8 @@ impl Session {
         retries: usize,
         return_outputs: bool,
         return_stats: bool,
-    ) -> PyResult<Run> {
-        // The dispatcher reads it as the worker's payload template, so
+    ) -> PyResult<Batches> {
+        // The dispatcher builds the worker's payload on it, so
         // anything else fails inside AWS with every invocation billed for.
         if !constant_args.is_instance_of::<PyDict>() {
             return Err(PyTypeError::new_err(format!(
@@ -255,35 +256,35 @@ impl Session {
         let constant_args: Map<String, Value> = json(constant_args, "constant_args")?;
         let inputs: Vec<Value> = json(inputs, "inputs")?;
 
-        let mut lambdas = self.0.lock().expect("unpoisoned");
-        let settings = lambdas.settings_mut();
+        let mut session = self.0.lock().expect("unpoisoned");
+        let settings = session.settings_mut();
         settings.dispatcher_function = dispatcher_function;
         settings.dispatchers = dispatchers;
         settings.concurrency = concurrency;
         settings.retries = retries;
         settings.return_stats = return_stats;
-        let run = if return_outputs {
-            lambdas.map_unordered(function, inputs, input_key, constant_args)
+        let batches = if return_outputs {
+            session.map_unordered(worker_function, inputs, input_key, constant_args)
         } else {
-            lambdas.for_each(function, inputs, input_key, constant_args)
+            session.for_each(worker_function, inputs, input_key, constant_args)
         };
-        Ok(Run {
-            run: Arc::new(Mutex::new(Some(run.map_err(to_py)?))),
+        Ok(Batches {
+            batches: Arc::new(Mutex::new(Some(batches.map_err(to_py)?))),
         })
     }
 
-    /// Invoke `function` once with `payload` and do not wait for it to run.
-    fn invoke<'py>(
+    /// Invoke `function_name` once with `payload` and do not wait for it to run.
+    fn invoke_detached<'py>(
         &self,
         py: Python<'py>,
-        function: String,
+        function_name: String,
         payload: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let invoked = self
             .0
             .lock()
             .expect("unpoisoned")
-            .invoke(&function, payload.into_bytes());
+            .invoke_detached(&function_name, payload.into_bytes());
         future_into_py(py, async move { invoked.await.map_err(to_py) })
     }
 }
@@ -292,8 +293,8 @@ impl Session {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Batch>()?;
     m.add_class::<Body>()?;
-    m.add_class::<Client>()?;
-    m.add_class::<Run>()?;
+    m.add_class::<Invoker>()?;
+    m.add_class::<Batches>()?;
     m.add_class::<Session>()?;
     m.add_class::<Stub>()?;
     m.add_function(wrap_pyfunction!(connect, m)?)?;

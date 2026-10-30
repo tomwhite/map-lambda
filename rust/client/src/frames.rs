@@ -70,14 +70,14 @@ mod tests {
     use map_lambda_protocol::Frame;
 
     const COMPLETED: &[u8] =
-        br#"{"Completed":{"done":2,"outputs":[],"stats":[],"first_error":null}}"#;
+        br#"{"Completed":{"succeeded":2,"outputs":[],"invocation_stats":[],"first_error":null}}"#;
 
-    fn done(frames: &[Frame]) -> Vec<usize> {
+    fn succeeded(frames: &[Frame]) -> Vec<usize> {
         frames
             .iter()
             .map(|frame| match frame {
-                Frame::Completed(completed) => completed.done,
-                Frame::Result(_) => usize::MAX,
+                Frame::Completed(completed) => completed.succeeded,
+                Frame::Summary(_) => usize::MAX,
             })
             .collect()
     }
@@ -98,7 +98,7 @@ mod tests {
             .push(&deployed(&[COMPLETED]))
             .expect("parses");
 
-        assert_eq!(done(&frames), [2]);
+        assert_eq!(succeeded(&frames), [2]);
     }
 
     /// As on a local run. Waiting for a prelude would never yield.
@@ -108,7 +108,7 @@ mod tests {
             .push(&[COMPLETED, b"\n"].concat())
             .expect("parses");
 
-        assert_eq!(done(&frames), [2]);
+        assert_eq!(succeeded(&frames), [2]);
     }
 
     /// A chunk boundary can fall anywhere, including inside the prelude
@@ -121,7 +121,7 @@ mod tests {
             let mut frames = framer.push(&body[..cut]).expect("parses");
             frames.extend(framer.push(&body[cut..]).expect("parses"));
 
-            assert_eq!(done(&frames), [2, 2], "cut at {cut}");
+            assert_eq!(succeeded(&frames), [2, 2], "cut at {cut}");
         }
     }
 

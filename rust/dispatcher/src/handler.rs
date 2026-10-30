@@ -4,8 +4,8 @@
 //! Everything about dispatching a partition is in `dispatch`, which reports
 //! through a `ReportCallback` and never sees a `Sender`.
 
-use crate::clients;
 use crate::dispatch::{dispatch, ReportCallback};
+use crate::lambda_clients;
 use crate::protocol::{Completed, Frame, Request};
 use lambda_runtime::streaming::{channel, Body, Response as StreamResponse, Sender};
 use lambda_runtime::{Error, LambdaEvent};
@@ -23,22 +23,30 @@ async fn send(tx: &mut Sender, frame: &Frame) -> Result<(), Error> {
 }
 
 /// A partition's reports, as frames on the response body.
-struct Frames<'a>(&'a mut Sender);
+struct FrameWriter<'a>(&'a mut Sender);
 
-impl ReportCallback for Frames<'_> {
+impl ReportCallback for FrameWriter<'_> {
     async fn completed(&mut self, completed: Completed) -> Result<(), Error> {
         send(self.0, &Frame::Completed(completed)).await
     }
 }
 
-/// Dispatch the partition and send its result as the last frame.
+/// Dispatch the partition and send its summary as the last frame.
 async fn run_partition(event: LambdaEvent<Request>, tx: &mut Sender) -> Result<(), Error> {
     let req_id = event.context.request_id;
-    let (clients, cold) = clients::for_request(event.payload.endpoint_url.as_deref()).await;
+    let (lambda_clients, cold) =
+        lambda_clients::for_request(event.payload.endpoint_url.as_deref()).await;
 
-    let response = dispatch(event.payload, req_id, &clients, cold, &mut Frames(tx)).await?;
+    let stats = dispatch(
+        event.payload,
+        req_id,
+        &lambda_clients,
+        cold,
+        &mut FrameWriter(tx),
+    )
+    .await?;
 
-    send(tx, &Frame::Result(Box::new(response))).await
+    send(tx, &Frame::Summary(Box::new(stats))).await
 }
 
 /// Returns as soon as the stream exists, with the partition running behind
@@ -55,7 +63,7 @@ pub(crate) async fn function_handler(
     tokio::spawn(async move {
         if run_partition(event, &mut tx).await.is_err() {
             // A truncated stream says why it failed; a well-formed one
-            // lacking a result frame would not.
+            // lacking a summary frame would not.
             tx.abort();
         }
     });

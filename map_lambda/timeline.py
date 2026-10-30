@@ -1,5 +1,5 @@
 """
-A timeline of a run: one row per invocation, showing when its call
+A timeline of invocations: one row per invocation, showing when its call
 began, when it went on the wire, when the function actually ran, and
 when it came back.
 
@@ -13,7 +13,7 @@ from .stats import Stats
 
 # (label, key, colour). Colours are fixed so the execution band never
 # shares one with a scatter series. `call_start` is shared by a whole
-# phase, so it plots as a vertical line.
+# call, so it plots as a vertical line.
 CLIENT_FIELDS = [
     ("call", "call_start", "tab:blue"),
     ("invoke start", "invoke_start", "tab:orange"),
@@ -23,14 +23,13 @@ CLIENT_FIELDS = [
 EXECUTION_COLOUR = "tab:green"
 
 # Past this the plot is thinned to every nth invocation, to keep an SVG
-# openable: a 23,612-task run is otherwise ~118,000 points.
+# openable: 23,612 invocations are otherwise ~118,000 points.
 DEFAULT_MAX_POINTS = 4000
 
 
-def phases(records: Sequence[Stats]) -> list[list[Stats]]:
+def by_call(records: Sequence[Stats]) -> list[list[Stats]]:
     """
-    A run's invocations grouped by the call they came from, in
-    order.
+    Invocations grouped by the call they came from, in order.
     """
     groups: dict[float, list[Stats]] = {}
     for record in records:
@@ -43,7 +42,7 @@ def thin(records: list[Stats], max_points: int) -> tuple[list[Stats], int]:
     Every nth record, and the stride used - 1 when nothing was dropped.
 
     Striding an already-sorted list rather than sampling at random keeps
-    each phase's share of the plot, and keeps the staircase edges that
+    each call's share of the plot, and keeps the staircase edges that
     are the point of looking.
     """
     if max_points <= 0 or len(records) <= max_points:
@@ -86,13 +85,13 @@ def generate_timeline(
     if not records:
         raise ValueError("no invocation records to plot")
 
-    # By completion, not dispatch: a phase dispatches within a fraction of
+    # By completion, not dispatch: a call dispatches within a fraction of
     # a second, so dispatch order is near-arbitrary, while completion order
     # shows the waves as a staircase. `invoke end` is monotone by
     # construction.
     ordered = sorted(records, key=lambda r: (r["call"], r["invoke_end"]))
     start = min(r["call_start"] for r in ordered)
-    groups = phases(ordered)
+    groups = by_call(ordered)
     shown, stride = thin(ordered, max_points)
     y = range(len(shown))
 
@@ -100,7 +99,7 @@ def generate_timeline(
 
     windows = [execution_window(r) for r in shown]
     if any(w is not None for w in windows):
-        # one line per task rather than a scatter pair, so the queueing
+        # one line per invocation rather than a scatter pair, so the queueing
         # gap in front of it is readable as a gap
         for row, window in zip(y, windows, strict=True):
             if window is not None:
@@ -135,7 +134,7 @@ def generate_timeline(
             ax.text(
                 0.995,
                 boundary + rows / 2,
-                f"op {n}\n{len(group):,} tasks",
+                f"call {n}\n{len(group):,} invocations",
                 transform=ax.get_yaxis_transform(),
                 ha="right",
                 va="center",
@@ -144,15 +143,17 @@ def generate_timeline(
             )
             boundary += rows
 
-    ax.set_xlabel("Time since first task created (sec)")
+    ax.set_xlabel("Time since first call began (sec)")
     order = "in completion order"
-    ax.set_ylabel(f"Task, {order} (every {stride:,})" if stride > 1 else f"Task, {order}")
+    ax.set_ylabel(
+        f"Invocation, {order} (every {stride:,})" if stride > 1 else f"Invocation, {order}"
+    )
     ax.set_ylim(-0.01 * len(shown), 1.01 * len(shown))
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title, pad=28)
-    # above the axes: the phase labels own the right margin, and a run
-    # whose tasks fill the plot leaves no reliable corner free
+    # above the axes: the call labels own the right margin, and invocations
+    # that fill the plot leaves no reliable corner free
     ax.legend(
         loc="lower left",
         bbox_to_anchor=(0, 1.02, 1, 0.1),

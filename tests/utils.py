@@ -66,26 +66,26 @@ async def check_invocation_counts_async(
     assert actual_invocation_counts == expected_invocation_counts
 
 
-def mapped(lambdas, function_name, inputs, **kwargs):
+def mapped(session, function_name, inputs, **kwargs):
     """
     `map_unordered` drained into input order, with `None` where a worker
-    answered nothing.
+    returned nothing.
 
     What most of these tests want to assert on, and what a caller who
-    needs every answer together writes for itself.
+    needs every output together writes for itself.
     """
 
     async def go():
         values = [None] * len(inputs)
-        async for index, answer in lambdas.map_unordered(function_name, inputs, **kwargs):
-            values[index] = answer
+        async for index, output in session.map_unordered(function_name, inputs, **kwargs):
+            values[index] = output
         return values
 
     return asyncio.run(go())
 
 
 def drain(stream):
-    """Every `(index, answer)` a `map_unordered` yields, in arrival order."""
+    """Every `(index, output)` a `map_unordered` yields, in arrival order."""
 
     async def go():
         return [pair async for pair in stream]

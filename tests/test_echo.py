@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from map_lambda import LOCAL_ENDPOINT_URL, Lambdas
+from map_lambda import LOCAL_ENDPOINT_URL, Session
 
 from .utils import check_invocation_counts
 
@@ -15,19 +15,19 @@ async def echo(
     **settings: Any,
 ):
 
-    async with Lambdas(dispatcher_stats=[], invocation_stats=[], **settings) as lambdas:
+    async with Session(dispatcher_stats=[], invocation_stats=[], **settings) as session:
         constant_args: dict[str, Any] = {
             "path": path,
             "timing_map": timing_map,
             "default_sleep": 0.0,
         }
         outputs = [
-            answer
-            async for _, answer in lambdas.map_unordered(
+            output
+            async for _, output in session.map_unordered(
                 "echo", i, input_key="i", constant_args=constant_args
             )
         ]
-        return outputs, lambdas.dispatcher_stats, lambdas.invocation_stats
+        return outputs, session.dispatcher_stats, session.invocation_stats
 
 
 @pytest.mark.lambda_integration
@@ -39,7 +39,7 @@ def test_echo(tmp_path):
     )
 
     # a real dispatcher finishes them in whatever order they come back
-    assert sorted(answer["i"] for answer in outputs) == [0, 1, 2]
+    assert sorted(output["i"] for output in outputs) == [0, 1, 2]
 
     assert len(partitions) == 1
     assert partitions[0]["dispatched"] == 3
@@ -131,8 +131,10 @@ def test_echo_failure(tmp_path):
 @pytest.mark.lambda_integration
 def test_invoke_runs_the_worker_without_waiting_for_it(tmp_path):
     async def invoke_and_wait() -> None:
-        async with Lambdas(endpoint_url=LOCAL_ENDPOINT_URL) as lambdas:
-            await lambdas.invoke("echo", path=str(tmp_path), i=0, timing_map={}, default_sleep=0.0)
+        async with Session(endpoint_url=LOCAL_ENDPOINT_URL) as session:
+            await session.invoke_detached(
+                "echo", path=str(tmp_path), i=0, timing_map={}, default_sleep=0.0
+            )
         # Returned once submitted, so the worker may not have run yet.
         for _ in range(100):
             if (tmp_path / "0").exists():

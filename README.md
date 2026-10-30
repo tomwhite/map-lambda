@@ -42,8 +42,8 @@ The `map_lambda` Python module provides a small API for running map functions. T
 ```python
 import map_lambda
 
-async for index, answer in map_lambda.map_unordered("square", [1, 2, 3], input_key="input"):
-    print(index, answer)
+async for index, output in map_lambda.map_unordered("square", [1, 2, 3], input_key="input"):
+    print(index, output)
 ```
 
 `square` is the name of an AWS Lambda function, implemented in Rust using Cargo Lambda, which receives a request struct with a field containing the input value, and returns a response struct with the output:
@@ -77,7 +77,7 @@ The worker lambda must be **idempotent** since inputs may be rerun in some circu
 
 Inputs and outputs are sent as JSON, so they must be JSON-serialisable (e.g. Python `pickle` is *not* used). Inputs and outputs are used to coordinate a computation, so they should be small (a few KB) - large data values may be processed by providing a reference to them; they should not be passed as inputs or outputs.
 
-`map_unordered` yields a **pair** per answer: the position in `inputs` of the invocation that produced it, and a **dict** of the fields of the Rust `Response` object. Answers arrive **as the workers finish them**, in no particular order, so `index` is what ties an answer to its input. For the example above the output is some permutation of:
+`map_unordered` yields a **pair** per output: the position in `inputs` of the invocation that produced it, and a **dict** of the fields of the Rust `Response` object. Outputs arrive **as the workers finish them**, in no particular order, so `index` is what ties an output to its input. For the example above the output is some permutation of:
 
 ```
 0 {'output': 1}
@@ -99,7 +99,7 @@ The call fails with a `RuntimeError` in any of the following cases:
 - if the inputs cannot be dispatched,
 - if any invocation fails (a worker error, or a transport error after retrying),
 - if there is a stream error,
-- if the stream does not end with a result frame,
+- if the stream does not end with a summary frame,
 - or if the dispatcher fails.
 
 ## Out of scope

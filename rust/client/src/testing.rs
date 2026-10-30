@@ -1,6 +1,6 @@
 //! A stand-in for Lambda, so a test can drive the client without AWS.
 
-use crate::transport::{Chunks, Transport};
+use crate::invoker::{Chunks, Invoker};
 use crate::Error;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::future::BoxFuture;
@@ -18,7 +18,7 @@ pub struct Stub {
 }
 
 impl Stub {
-    /// The body the next dispatcher invocation answers with, delivered a
+    /// The body the next dispatcher invocation responds with, delivered a
     /// chunk per send and ended by dropping the sender. It reports
     /// `is_closed` once the client has stopped reading.
     pub fn respond(&self) -> UnboundedSender<Vec<u8>> {
@@ -32,16 +32,16 @@ impl Stub {
         self.requests.lock().expect("unpoisoned").clone()
     }
 
-    /// Every fire-and-forget invocation, as `(function, payload)`.
+    /// Every fire-and-forget invocation, as `(function_name, payload)`.
     pub fn invoked(&self) -> Vec<(String, Vec<u8>)> {
         self.invoked.lock().expect("unpoisoned").clone()
     }
 }
 
-impl Transport for Stub {
-    fn stream<'a>(
+impl Invoker for Stub {
+    fn invoke_streaming<'a>(
         &'a self,
-        _function: &'a str,
+        _function_name: &'a str,
         payload: Vec<u8>,
     ) -> BoxFuture<'a, Result<Chunks, Error>> {
         self.requests.lock().expect("unpoisoned").push(payload);
@@ -52,15 +52,15 @@ impl Transport for Stub {
         })
     }
 
-    fn invoke<'a>(
+    fn invoke_detached<'a>(
         &'a self,
-        function: &'a str,
+        function_name: &'a str,
         payload: Vec<u8>,
     ) -> BoxFuture<'a, Result<(), Error>> {
         self.invoked
             .lock()
             .expect("unpoisoned")
-            .push((function.to_string(), payload));
+            .push((function_name.to_string(), payload));
         Box::pin(async { Ok(()) })
     }
 }
