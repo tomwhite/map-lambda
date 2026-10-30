@@ -1,6 +1,7 @@
 //! One worker invocation: what to send, what came back, and how many
 //! times to try.
 
+use aws_sdk_lambda::error::ProvideErrorMetadata;
 use aws_sdk_lambda::operation::RequestId;
 use aws_sdk_lambda::primitives::Blob;
 use aws_sdk_lambda::Client;
@@ -21,7 +22,20 @@ pub(crate) enum Outcome {
     Function(String),
     /// The request never reached a working worker.
     Transport(String),
+    /// Lambda refused the request, and would refuse it again.
+    Rejected(String),
 }
+
+/// Error codes that another attempt can't change. Anything not listed is
+/// retried.
+const PERMANENT_ERROR_CODES: [&str; 6] = [
+    "AccessDeniedException",
+    "InvalidParameterValueException",
+    "InvalidRequestContentException",
+    "RequestTooLargeException",
+    "ResourceNotFoundException",
+    "UnsupportedMediaTypeException",
+];
 
 /// An invocation Lambda ran without the error channel firing: a
 /// success, whatever the body says.
@@ -118,7 +132,7 @@ pub(crate) struct Attempted {
 }
 
 /// One invocation, with `retries` further attempts after a *transport*
-/// failure.
+/// failure, which excludes a rejection.
 pub(crate) async fn invoke_with_retries(
     client: &Client,
     function_name: &str,
@@ -146,7 +160,13 @@ pub(crate) async fn invoke_with_retries(
                 output.request_id().unwrap_or_default(),
                 output.payload().map(|blob| blob.as_ref()),
             ),
-            Err(e) => Outcome::Transport(error_chain(&e)),
+            Err(e) => match e.code() {
+                Some(code) if PERMANENT_ERROR_CODES.contains(&code) => Outcome::Rejected(format!(
+                    "{code} invoking {function_name}: {}",
+                    e.message().unwrap_or("no message")
+                )),
+                _ => Outcome::Transport(error_chain(&e)),
+            },
         };
         if !matches!(outcome, Outcome::Transport(_)) || attempts_beyond_first >= retries {
             return Attempted {
@@ -212,6 +232,15 @@ mod tests {
         http::Response::builder()
             .status(500)
             .body(SdkBody::from("{}"))
+            .expect("a valid response")
+    }
+
+    /// Lambda refusing the request.
+    fn rejected(status: u16, code: &str, message: &str) -> http::Response<SdkBody> {
+        http::Response::builder()
+            .status(status)
+            .header("x-amzn-errortype", code)
+            .body(SdkBody::from(json!({"Message": message}).to_string()))
             .expect("a valid response")
     }
 
@@ -383,6 +412,60 @@ mod tests {
         assert!(matches!(outcome, Outcome::Function(_)));
         assert_eq!(retried, 0);
         assert_eq!(attempts, 1);
+    }
+
+    /// No wait either: every invocation of a run fails this way, and the
+    /// call should say so at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_permission_is_not_retried() {
+        let (client, http_client) = replaying(vec![
+            rejected(403, "AccessDeniedException", "role is not authorized"),
+            worker_ok("never reached"),
+        ]);
+        let before = tokio::time::Instant::now();
+        let attempted = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+
+        match attempted.outcome {
+            Outcome::Rejected(message) => assert_eq!(
+                message,
+                "AccessDeniedException invoking echo: role is not authorized"
+            ),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        assert_eq!(attempted.retried, 0);
+        assert_eq!(attempts_made(&http_client), 1);
+        assert_eq!(before.elapsed().as_millis(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_missing_function_is_not_retried() {
+        let (outcome, retried, attempts) = invoke(
+            vec![
+                rejected(404, "ResourceNotFoundException", "Function not found"),
+                worker_ok("never reached"),
+            ],
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Rejected(_)));
+        assert_eq!(retried, 0);
+        assert_eq!(attempts, 1);
+    }
+
+    /// Throttling is not permanent: the same request can succeed later.
+    #[tokio::test(start_paused = true)]
+    async fn a_throttle_is_retried() {
+        let (outcome, retried, attempts) = invoke(
+            vec![
+                rejected(429, "TooManyRequestsException", "Rate exceeded"),
+                worker_ok("w-5"),
+            ],
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Ok { .. }));
+        assert_eq!(retried, 1);
+        assert_eq!(attempts, 2);
     }
 
     /// Unlike `first_error`, which is the first across *invocations*,

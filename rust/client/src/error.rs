@@ -45,7 +45,7 @@ pub enum Error {
         need: usize,
     },
 
-    #[error("an invocation failed its last attempt, so the call cannot succeed: {0}")]
+    #[error("an invocation failed, so the call cannot succeed: {0}")]
     InvocationFailed(String),
 
     #[error(
