@@ -134,7 +134,7 @@ def test_an_input_whose_worker_returned_nothing_is_never_yielded():
     assert _outputs(invoker, ["a", "b"]) == [(1, "b")]
 
 
-def test_stopping_early_tears_down_the_dispatchers_still_running():
+def test_stopping_early_closes_the_streams_of_dispatchers_still_running():
     invoker = RecordingInvoker()
     body = invoker.respond()
     body.write(dispatcher_body(completed(succeeded=1, outputs=[{"index": 0, "value": "first"}])))

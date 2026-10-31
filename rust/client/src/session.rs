@@ -97,7 +97,8 @@ impl Session {
     /// order they finished.
     ///
     /// Refuses, with nothing invoked, a call that could not work. Dropping
-    /// the stream tears down the dispatchers still running.
+    /// the stream closes the dispatchers' streams, but Lambda does not tell
+    /// them, so each still runs the rest of its partition.
     pub fn map_unordered(
         &self,
         worker_function: &str,

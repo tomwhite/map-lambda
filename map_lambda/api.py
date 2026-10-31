@@ -174,8 +174,8 @@ class Session:
             return_outputs=return_outputs,
             return_stats=self.invocation_stats is not None,
         )
-        # Closed explicitly so that stopping early tears the dispatchers
-        # down now, rather than whenever `batches` is collected.
+        # Closed explicitly so that stopping early closes the dispatchers'
+        # streams now, rather than whenever `batches` is collected.
         try:
             async for batch in batches:
                 if self.invocation_stats is not None:
