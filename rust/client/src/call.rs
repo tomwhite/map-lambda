@@ -251,8 +251,15 @@ fn check(stats: &DispatcherStats, succeeded: usize, expected: usize) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::{check, start, Call};
+    use crate::invoker::{Chunks, Invoker};
+    use crate::Error;
+    use futures::executor::block_on;
+    use futures::future::BoxFuture;
+    use futures::stream::StreamExt;
     use map_lambda_protocol::DispatcherStats;
+    use serde_json::{json, Map};
+    use std::sync::Arc;
 
     fn stats(succeeded: usize) -> DispatcherStats {
         DispatcherStats {
@@ -265,6 +272,61 @@ mod tests {
             connections: 1,
             elapsed_ms: 1.0,
         }
+    }
+
+    /// Answers with a whole partition's frames, then a stream error.
+    struct FailsAfterItsResult;
+
+    impl Invoker for FailsAfterItsResult {
+        fn invoke_streaming<'a>(
+            &'a self,
+            _function: &'a str,
+            _payload: Vec<u8>,
+        ) -> BoxFuture<'a, Result<Chunks, Error>> {
+            let completed = json!({"Completed": {
+                "succeeded": 1, "outputs": [], "invocation_stats": [], "first_error": null,
+            }});
+            let summary = json!({"Summary": stats(1)});
+            let chunks: Vec<Result<Vec<u8>, Error>> = vec![
+                Ok(format!("{completed}\n{summary}\n").into_bytes()),
+                Err(Error::FailedMidStream("the stream failed".to_string())),
+            ];
+            Box::pin(async move { Ok(Box::pin(futures::stream::iter(chunks)) as Chunks) })
+        }
+
+        fn invoke_detached<'a>(
+            &'a self,
+            _function: &'a str,
+            _payload: Vec<u8>,
+        ) -> BoxFuture<'a, Result<(), Error>> {
+            unreachable!("a call never invokes detached")
+        }
+    }
+
+    #[test]
+    fn a_stream_failing_after_its_result_fails_the_call() {
+        let call = Call {
+            dispatcher_function: "dispatcher".to_string(),
+            worker_function: "worker".to_string(),
+            input_key: "i".to_string(),
+            constant_args: Map::new(),
+            dispatchers: Some(1),
+            concurrency: 1,
+            retries: 0,
+            endpoint_url: None,
+            return_outputs: false,
+            return_stats: false,
+            number: 0,
+        };
+        let batches = start(Arc::new(FailsAfterItsResult), call, vec![json!(0)]).expect("starts");
+
+        let mut batches: Vec<_> = block_on(batches.collect());
+
+        assert!(matches!(
+            batches.pop(),
+            Some(Err(Error::FailedMidStream(_)))
+        ));
+        assert!(batches.iter().all(Result::is_ok));
     }
 
     #[test]
