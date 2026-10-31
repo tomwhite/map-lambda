@@ -286,6 +286,15 @@ def test_auto_sizes_the_session_and_an_explicit_count_still_wins():
     assert len(invoker.payloads) == 2
 
 
+def test_fewer_in_flight_than_dispatchers_is_refused_before_dispatching():
+    invoker = RecordingInvoker([])
+    session = Session(dispatchers=2, concurrency=1)
+    session._invoker = invoker
+    with pytest.raises(ValueError, match="too small to split"):
+        asyncio.run(session.for_each("worker", [1, 2], input_key="i"))
+    assert invoker.payloads == []
+
+
 @pytest.mark.parametrize("constant_args", [[("prefix", "p")], []])
 def test_constant_args_that_are_not_a_dict_are_refused_before_dispatching(constant_args):
     """
