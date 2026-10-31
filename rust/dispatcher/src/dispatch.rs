@@ -10,6 +10,7 @@ use crate::tally::{Return, Tally};
 use aws_sdk_lambda::Client as LambdaClient;
 use futures::stream::StreamExt;
 use lambda_runtime::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time::MissedTickBehavior;
 
@@ -22,6 +23,18 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 /// stops.
 pub(crate) trait ReportCallback {
     async fn completed(&mut self, completed: Completed) -> Result<(), Error>;
+}
+
+/// The connection with the fewest invocations in flight, the earliest of
+/// any tied.
+///
+/// Never above an even share of `max_in_flight`, which `connections_for`
+/// keeps within `STREAMS_PER_CONNECTION`. Dealing inputs out by position
+/// would not be: the slow ones can land together and stay there.
+fn least_busy(in_flight: &[AtomicUsize]) -> usize {
+    (0..in_flight.len())
+        .min_by_key(|&connection| in_flight[connection].load(Ordering::Relaxed))
+        .expect("at least one connection")
 }
 
 /// Run one partition: invoke `worker_function` once per input, with
@@ -60,14 +73,20 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     callback.completed(tally.take_completed()).await?;
 
     let started = Instant::now();
+    // Atomic because the handler's spawned task has to be `Send`.
+    let in_flight: Vec<AtomicUsize> = (0..connections).map(|_| AtomicUsize::new(0)).collect();
+    let in_flight = in_flight.as_slice();
     // The invocations, started only as the loop below polls them.
     let mut results = futures::stream::iter(inputs.into_iter().enumerate())
         .map(|(i, input)| {
             let body = payload_for(&constant_args, &input_key, input);
-            let client = &lambda_clients[i % connections];
+            let connection = least_busy(in_flight);
+            in_flight[connection].fetch_add(1, Ordering::Relaxed);
+            let client = &lambda_clients[connection];
             let worker: &str = &worker_function;
             async move {
                 let invocation = invoke_with_retries(client, worker, body, retries).await;
+                in_flight[connection].fetch_sub(1, Ordering::Relaxed);
                 // `buffer_unordered` yields in completion order.
                 (i, invocation)
             }
@@ -109,7 +128,7 @@ pub(crate) async fn dispatch<S: ReportCallback>(
 #[cfg(test)]
 mod tests {
     use super::{dispatch, Completed, ReportCallback};
-    use crate::protocol::Request;
+    use crate::protocol::{Request, STREAMS_PER_CONNECTION};
     use aws_config::retry::RetryConfig;
     use aws_credential_types::Credentials;
     use aws_sdk_lambda::config::Region;
@@ -125,6 +144,8 @@ mod tests {
     use lambda_runtime::Error;
     use serde_json::json;
     use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::time::Instant;
 
@@ -262,6 +283,60 @@ mod tests {
                 .http_client(FirstInputIsFast { fast })
                 .build(),
         )]
+    }
+
+    /// Lambda with a slow worker for even inputs and a fast one for odd,
+    /// counting the invocations in flight on this connection.
+    #[derive(Debug, Clone, Default)]
+    struct CountingStreams {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl HttpConnector for CountingStreams {
+        fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+            let body: Value = serde_json::from_slice(request.body().bytes().expect("a body"))
+                .expect("a worker payload");
+            let slow = body["coords"][0][0]
+                .as_u64()
+                .expect("an input")
+                .is_multiple_of(2);
+            let (in_flight, peak) = (self.in_flight.clone(), self.peak.clone());
+            HttpConnectorFuture::new(async move {
+                let now = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                peak.fetch_max(now, Ordering::Relaxed);
+                tokio::time::sleep(if slow {
+                    SLOW_WORKER
+                } else {
+                    Duration::from_millis(1)
+                })
+                .await;
+                in_flight.fetch_sub(1, Ordering::Relaxed);
+                Ok(HttpResponse::try_from(worker_ok()).expect("a response"))
+            })
+        }
+    }
+
+    impl HttpClient for CountingStreams {
+        fn http_connector(
+            &self,
+            _: &HttpConnectorSettings,
+            _: &RuntimeComponents,
+        ) -> SharedHttpConnector {
+            self.clone().into_shared()
+        }
+    }
+
+    fn counting(connection: &CountingStreams) -> LambdaClient {
+        LambdaClient::from_conf(
+            aws_sdk_lambda::Config::builder()
+                .behavior_version(aws_sdk_lambda::config::BehaviorVersion::latest())
+                .region(Region::new("eu-west-1"))
+                .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                .retry_config(RetryConfig::disabled())
+                .http_client(connection.clone())
+                .build(),
+        )
     }
 
     /// When each frame went out, against a paused clock.
@@ -559,6 +634,34 @@ mod tests {
 
         // The opening frame, the fast worker and the slow one.
         assert_eq!(callback.frames.len(), 3);
+    }
+
+    /// Past `MAX_STREAMS_PER_CONNECTION` requests queue on their connection
+    /// however idle the others are, so slow inputs must not pile up on one.
+    #[tokio::test(start_paused = true)]
+    async fn slow_invocations_do_not_pile_up_on_one_connection() {
+        let connections = [CountingStreams::default(), CountingStreams::default()];
+        let lambda_clients: Vec<LambdaClient> = connections.iter().map(counting).collect();
+        let mut request = a_request(1_000);
+        request.max_in_flight = 2 * STREAMS_PER_CONNECTION;
+
+        dispatch(
+            request,
+            "c-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut Recorder::default(),
+        )
+        .await
+        .expect("dispatched");
+
+        let peaks = connections
+            .each_ref()
+            .map(|c| c.peak.load(Ordering::Relaxed));
+        assert!(
+            peaks.iter().all(|peak| *peak <= STREAMS_PER_CONNECTION),
+            "{peaks:?}"
+        );
     }
 
     #[tokio::test]
