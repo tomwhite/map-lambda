@@ -145,6 +145,7 @@ pub(crate) fn start(
 
     Ok(Box::pin(try_stream! {
         let mut summaries: Vec<Option<DispatcherStats>> = vec![None; count];
+        let mut succeeded = vec![0; count];
         while let Some((partition, frame)) = arriving.next().await {
             match frame? {
                 Frame::Completed(completed) => {
@@ -153,6 +154,7 @@ pub(crate) fn start(
                     if let Some(error) = completed.first_error {
                         Err(Error::InvocationFailed(error))?;
                     }
+                    succeeded[partition] += completed.succeeded;
                     // Partition k holds inputs[k::count].
                     let place = |index: usize| partition + index * count;
                     let batch = Batch {
@@ -186,7 +188,7 @@ pub(crate) fn start(
             ..Batch::default()
         };
         for (partition, stats) in finished.iter().enumerate() {
-            check(stats, expected[partition])?;
+            check(stats, succeeded[partition], expected[partition])?;
         }
     }))
 }
@@ -232,13 +234,14 @@ fn frames(
 /// Fail unless a dispatcher did all of its partition.
 ///
 /// A short partition is silent - skipped work just never happens - so
-/// the count is checked against `expected`, the number of inputs this
-/// side sent.
-fn check(stats: &DispatcherStats, expected: usize) -> Result<(), Error> {
-    if stats.succeeded != expected {
+/// `succeeded`, the total across its frames, is checked against `expected`,
+/// the number of inputs this side sent. Not the summary's `succeeded`:
+/// only the frames carry outputs.
+fn check(stats: &DispatcherStats, succeeded: usize, expected: usize) -> Result<(), Error> {
+    if succeeded != expected {
         return Err(Error::PartitionShort {
             req_id: stats.req_id.clone(),
-            succeeded: stats.succeeded,
+            succeeded,
             expected,
         });
     }
@@ -263,22 +266,15 @@ mod tests {
         }
     }
 
-    fn refusal(stats: DispatcherStats, expected: usize) -> String {
-        check(&stats, expected).expect_err("refused").to_string()
-    }
-
     #[test]
     fn a_clean_full_partition_passes() {
-        check(&stats(42), 42).expect("clean");
+        check(&stats(42), 42, 42).expect("clean");
     }
 
     /// The dangerous case: work silently skipped.
     #[test]
     fn a_short_partition_with_no_error_is_refused() {
-        let short = DispatcherStats {
-            dispatched: 42,
-            ..stats(41)
-        };
-        assert!(refusal(short, 42).contains("completed 41 of 42"));
+        let refused = check(&stats(42), 41, 42).expect_err("refused");
+        assert!(refused.to_string().contains("completed 41 of 42"));
     }
 }
