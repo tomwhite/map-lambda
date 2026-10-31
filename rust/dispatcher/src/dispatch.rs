@@ -415,7 +415,6 @@ mod tests {
         .expect("dispatched");
 
         assert_eq!(stats.succeeded, 2);
-        assert_eq!(stats.function_errors, 0);
     }
 
     /// The worker's own body, verbatim, against the position of the
@@ -521,9 +520,9 @@ mod tests {
     }
 
     /// A failed worker does not stop the partition: the dispatcher
-    /// counts it and dispatches on, and the client is what raises.
+    /// reports it and dispatches on, and the client is what raises.
     #[tokio::test]
-    async fn a_failed_invocation_is_counted_rather_than_returned() {
+    async fn a_failed_invocation_is_reported_rather_than_returned() {
         let lambda_clients = replaying(vec![worker_ok(), worker_failed()]);
         let mut callback = Recorder::default();
 
@@ -537,13 +536,12 @@ mod tests {
         .await
         .expect("dispatched");
 
-        let record = serde_json::to_value(&stats).expect("serializable");
-        assert_eq!(record["succeeded"], 1);
-        assert_eq!(record["function_errors"], 1);
-        assert!(record["first_error"]
-            .as_str()
-            .expect("a message")
-            .contains("boom"));
+        assert_eq!(stats.succeeded, 1);
+        let reported = callback
+            .frames
+            .iter()
+            .find_map(|frame| frame.first_error.as_deref());
+        assert!(reported.expect("a message").contains("boom"));
     }
 
     /// A failure can be the whole of a frame: nothing succeeded

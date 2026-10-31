@@ -124,18 +124,10 @@ pub struct DispatcherStats {
     pub req_id: String,
     pub dispatched: usize,
     pub succeeded: usize,
-    /// Lambda ran the worker and it failed: the error channel
-    /// (`X-Amz-Function-Error`), never anything in a body.
-    pub function_errors: usize,
-    /// The request never got a usable response: connection, timeout, or
-    /// an error status.
-    pub transport_errors: usize,
     /// Attempts beyond the first, across all invocations.
     pub retried: usize,
     /// Summed wait before those attempts.
     pub retry_wait_ms: f64,
-    /// The first failed invocation's message.
-    pub first_error: Option<String>,
     /// Whether this invocation had to build the Lambda clients, i.e.
     /// whether the execution environment was cold. Null for a local
     /// run, which has no shared set to build.
@@ -166,11 +158,8 @@ mod tests {
             req_id: "dispatcher-0".to_string(),
             dispatched: 3,
             succeeded: 3,
-            function_errors: 0,
-            transport_errors: 0,
             retried: 1,
             retry_wait_ms: 2.5,
-            first_error: None,
             cold: None,
             connections: 1,
             elapsed_ms: 1.0,

@@ -62,17 +62,15 @@ class Session:
     dispatcher_stats: list[dict[str, Any]] | None = None
     """
     Pass a list to collect stats for the dispatchers - one record per
-    dispatcher invocation, holding:
+    dispatcher invocation. A call stops at its first failed invocation
+    without waiting for these, so it collects none. Each record holds:
 
     * `req_id` - AWS's id for the dispatcher's own invocation, for finding
       its run in CloudWatch
     * `dispatched` - invocations it sent, which is its partition's size
     * `succeeded` - invocations that returned
-    * `function_errors` - the worker ran and failed
-    * `transport_errors` - the request never got a usable response
     * `retried` - attempts beyond the first, across the partition
     * `retry_wait_ms` - summed wait before those attempts
-    * `first_error` - the first failed invocation's message, or `None`
     * `cold` - whether the execution environment was cold, or `None` for a
       local run, which has no shared client set to build
     * `connections` - HTTP/2 connections the invocations were spread over

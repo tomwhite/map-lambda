@@ -112,11 +112,7 @@ def test_a_failed_invocation_raises_on_the_frame_that_reports_it():
             [
                 completed(succeeded=1, first_error="worker said no (req_id=w-7)"),
                 completed(succeeded=2),
-                {
-                    "Summary": dispatcher_summary(
-                        3, dispatched=5, transport_errors=2, first_error="worker said no"
-                    )
-                },
+                {"Summary": dispatcher_summary(3, dispatched=5)},
             ],
             [
                 completed(succeeded=5),
@@ -158,7 +154,7 @@ def test_a_dispatcher_record_per_partition_is_stamped_with_its_call():
     assert len({r["call"] for r in collected}) == 1
 
 
-def test_every_partitions_record_is_kept_when_one_of_them_fails():
+def test_every_partitions_record_is_kept_when_one_of_them_comes_up_short():
     """A losing run is when the records are most wanted."""
     invoker = RecordingInvoker([dispatcher_summary(4), dispatcher_summary(5)])
     collected: list[dict] = []
@@ -167,6 +163,25 @@ def test_every_partitions_record_is_kept_when_one_of_them_fails():
         _map(invoker, dispatcher_stats=collected)
 
     assert len(collected) == 2
+
+
+def test_a_failed_invocation_stops_the_call_before_any_dispatcher_record():
+    """Waiting for them would bill for work whose call has already failed."""
+    invoker = RecordingInvoker(
+        [
+            [
+                completed(succeeded=1, first_error="worker said no"),
+                {"Summary": dispatcher_summary(4, dispatched=5)},
+            ],
+            dispatcher_summary(5),
+        ]
+    )
+    collected: list[dict] = []
+
+    with pytest.raises(RuntimeError, match="cannot succeed: worker said no"):
+        _map(invoker, dispatcher_stats=collected)
+
+    assert collected == []
 
 
 def test_a_dispatcher_record_does_not_carry_its_partitions_invocations():

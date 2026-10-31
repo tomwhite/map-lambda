@@ -51,8 +51,9 @@ pub struct Batch {
     /// One per invocation, if [`Settings::return_stats`](crate::Settings::return_stats).
     pub invocation_stats: Vec<Record<InvocationStats>>,
     /// One per dispatcher, all in the last batch: they arrive before any
-    /// is checked, so a call that fails still says what each dispatcher
-    /// did.
+    /// is checked, so a call that fails a check still says what each
+    /// dispatcher did. A failed invocation stops the call before they
+    /// arrive, so it has none.
     pub dispatcher_stats: Vec<Record<DispatcherStats>>,
 }
 
@@ -228,20 +229,12 @@ fn frames(
     })
 }
 
-/// Fail unless a dispatcher did all of its partition, and cleanly.
+/// Fail unless a dispatcher did all of its partition.
 ///
 /// A short partition is silent - skipped work just never happens - so
-/// the count is checked as well as the errors, against `expected`, the
-/// number of inputs this side sent.
+/// the count is checked against `expected`, the number of inputs this
+/// side sent.
 fn check(stats: &DispatcherStats, expected: usize) -> Result<(), Error> {
-    if stats.function_errors + stats.transport_errors > 0 {
-        return Err(Error::InvocationsFailed {
-            req_id: stats.req_id.clone(),
-            function_errors: stats.function_errors,
-            transport_errors: stats.transport_errors,
-            first_error: stats.first_error.clone(),
-        });
-    }
     if stats.succeeded != expected {
         return Err(Error::PartitionShort {
             req_id: stats.req_id.clone(),
@@ -262,11 +255,8 @@ mod tests {
             req_id: "dispatcher-0".to_string(),
             dispatched: succeeded,
             succeeded,
-            function_errors: 0,
-            transport_errors: 0,
             retried: 0,
             retry_wait_ms: 0.0,
-            first_error: None,
             cold: Some(false),
             connections: 1,
             elapsed_ms: 1.0,
@@ -280,16 +270,6 @@ mod tests {
     #[test]
     fn a_clean_full_partition_passes() {
         check(&stats(42), 42).expect("clean");
-    }
-
-    #[test]
-    fn a_reported_failure_is_refused() {
-        let failed = DispatcherStats {
-            function_errors: 1,
-            first_error: Some("boom".into()),
-            ..stats(41)
-        };
-        assert!(refusal(failed, 42).contains("1 function"));
     }
 
     /// The dangerous case: work silently skipped.

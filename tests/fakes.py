@@ -53,7 +53,7 @@ def dispatcher_summary(succeeded: int, **overrides: Any) -> dict[str, Any]:
 
     `succeeded` sets `dispatched` too, because the ordinary case is a
     partition that did all of its work; `**overrides` is how a test says
-    otherwise, e.g. `transport_errors=1` for a failed one.
+    otherwise, e.g. `dispatched=5` for a short one.
 
     Outputs and records are not here: they ride on the `Completed`
     frames, and a summary frame repeating them would be a second copy of
@@ -63,11 +63,8 @@ def dispatcher_summary(succeeded: int, **overrides: Any) -> dict[str, Any]:
         "req_id": "dispatcher-0",
         "dispatched": succeeded,
         "succeeded": succeeded,
-        "function_errors": 0,
-        "transport_errors": 0,
         "retried": 0,
         "retry_wait_ms": 0.0,
-        "first_error": None,
         "cold": False,
         "connections": 1,
         "elapsed_ms": 1.0,
@@ -95,7 +92,7 @@ class RecordingInvoker(_native.Stub):
                 frames = canned
             else:
                 frames = [
-                    completed(succeeded=canned["succeeded"], first_error=canned.get("first_error")),
+                    completed(succeeded=canned["succeeded"]),
                     {"Summary": canned},
                 ]
             body = self.respond()

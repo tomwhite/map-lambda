@@ -44,8 +44,6 @@ def test_echo(tmp_path):
     assert len(partitions) == 1
     assert partitions[0]["dispatched"] == 3
     assert partitions[0]["succeeded"] == 3
-    assert partitions[0]["function_errors"] == partitions[0]["transport_errors"] == 0
-    assert partitions[0]["first_error"] is None
 
     assert sorted(record["index"] for record in records) == [0, 1, 2]
     # Present but empty: `cargo lambda watch` sets no `x-amzn-requestid`.
@@ -72,11 +70,8 @@ def test_a_real_dispatcher_sends_every_field_this_side_reads(tmp_path):
         "req_id",
         "dispatched",
         "succeeded",
-        "function_errors",
-        "transport_errors",
         "retried",
         "retry_wait_ms",
-        "first_error",
         "cold",
         "connections",
         "elapsed_ms",

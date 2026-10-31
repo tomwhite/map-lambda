@@ -172,9 +172,8 @@ mod tests {
         for _ in 0..calls {
             let body = stub.respond();
             let summary = json!({"Summary": {
-                "req_id": "d-0", "dispatched": 1, "succeeded": 1, "function_errors": 0,
-                "transport_errors": 0, "retried": 0, "retry_wait_ms": 0.0,
-                "first_error": null, "cold": false, "connections": 1, "elapsed_ms": 1.0,
+                "req_id": "d-0", "dispatched": 1, "succeeded": 1, "retried": 0,
+                "retry_wait_ms": 0.0, "cold": false, "connections": 1, "elapsed_ms": 1.0,
             }});
             let completed = json!({"Completed": {
                 "succeeded": 1, "outputs": [], "invocation_stats": [], "first_error": null,
