@@ -15,15 +15,11 @@ pub(crate) struct Tally {
     /// What the frames so far have accounted for.
     sent_succeeded: usize,
     succeeded: usize,
-    function_errors: usize,
-    transport_errors: usize,
     retried: usize,
     retry_wait_ms: f64,
+    /// The first failure of the frame being built, which the client
+    /// raises on.
     first_error: Option<String>,
-    /// The first error of the frame being built, which the client raises
-    /// on. Separate from `first_error`, which keeps the run's first for
-    /// the result and so cannot be taken away.
-    frame_error: Option<String>,
 }
 
 /// What a request wants returned beyond the counts.
@@ -41,20 +37,13 @@ impl Tally {
         }
     }
 
-    /// Keep a failure's message for the result and for the frame it
-    /// falls in, which are taken away at different times.
-    fn remember(&mut self, message: String) {
-        self.frame_error.get_or_insert_with(|| message.clone());
-        self.first_error.get_or_insert(message);
-    }
-
     /// Everything that has finished since the last call.
     pub(crate) fn take_completed(&mut self) -> Completed {
         let completed = Completed {
             succeeded: self.succeeded - self.sent_succeeded,
             outputs: std::mem::take(&mut self.outputs),
             invocation_stats: std::mem::take(&mut self.invocation_stats),
-            first_error: std::mem::take(&mut self.frame_error),
+            first_error: std::mem::take(&mut self.first_error),
         };
         self.sent_succeeded = self.succeeded;
         completed
@@ -91,13 +80,10 @@ impl Tally {
             }
             // The first *invocation* to fail; each reports its last
             // attempt.
-            Outcome::Function(message) => {
-                self.function_errors += 1;
-                self.remember(message);
-            }
-            Outcome::Transport(message) | Outcome::Rejected(message) => {
-                self.transport_errors += 1;
-                self.remember(message);
+            Outcome::Function(message)
+            | Outcome::Transport(message)
+            | Outcome::Rejected(message) => {
+                self.first_error.get_or_insert(message);
             }
         }
     }
@@ -116,11 +102,8 @@ impl Tally {
             req_id,
             dispatched,
             succeeded: self.succeeded,
-            function_errors: self.function_errors,
-            transport_errors: self.transport_errors,
             retried: self.retried,
             retry_wait_ms: self.retry_wait_ms,
-            first_error: self.first_error,
             cold,
             connections,
             elapsed_ms,
@@ -182,7 +165,6 @@ mod tests {
         observe(&mut tally, Outcome::Transport("gone".into()), 2);
         assert_eq!(tally.retried, 4);
         assert_eq!(tally.succeeded, 2);
-        assert_eq!(tally.transport_errors, 1);
     }
 
     /// Backoff otherwise turns a throttled run into a slow one with
@@ -197,13 +179,18 @@ mod tests {
     }
 
     #[test]
-    fn the_two_failure_kinds_are_counted_separately() {
-        let mut tally = returning_everything();
-        observe(&mut tally, Outcome::Function("bad input".into()), 0);
-        observe(&mut tally, Outcome::Transport("goaway".into()), 1);
-        assert_eq!(tally.function_errors, 1);
-        assert_eq!(tally.transport_errors, 1);
-        assert_eq!(tally.succeeded, 0);
+    fn a_failure_of_any_kind_is_reported_and_not_counted_as_done() {
+        for failure in [
+            Outcome::Function("no".into()),
+            Outcome::Transport("no".into()),
+            Outcome::Rejected("no".into()),
+        ] {
+            let mut tally = returning_everything();
+            observe(&mut tally, failure, 0);
+            let completed = tally.take_completed();
+            assert_eq!(completed.first_error.as_deref(), Some("no"));
+            assert_eq!(completed.succeeded, 0);
+        }
     }
 
     #[test]
@@ -212,15 +199,17 @@ mod tests {
         observe(&mut tally, ok("a"), 0);
         observe(&mut tally, Outcome::Transport("the first".into()), 0);
         observe(&mut tally, Outcome::Function("the second".into()), 0);
-        assert_eq!(tally.first_error.as_deref(), Some("the first"));
+        assert_eq!(
+            tally.take_completed().first_error.as_deref(),
+            Some("the first")
+        );
     }
 
     #[test]
     fn a_clean_partition_reports_no_error() {
         let mut tally = returning_everything();
         observe(&mut tally, ok("a"), 0);
-        assert!(tally.first_error.is_none());
-        assert_eq!((tally.function_errors, tally.transport_errors), (0, 0));
+        assert!(tally.take_completed().first_error.is_none());
     }
 
     /// The client sums the frames and checks the total against the
@@ -238,10 +227,7 @@ mod tests {
         assert_eq!((first.succeeded, second.succeeded), (1, 1));
         let stats = tally.into_stats("c-0".to_string(), 3, None, 1, 1.0);
         assert_eq!(first.succeeded + second.succeeded, stats.succeeded);
-        // A frame reports a failure as the message the client raises on;
-        // the count of them is the result's.
         assert_eq!(second.first_error.as_deref(), Some("no"));
-        assert_eq!(stats.function_errors + stats.transport_errors, 1);
     }
 
     /// The client raises on the frame rather than waiting for the
@@ -257,11 +243,8 @@ mod tests {
         let losing = tally.take_completed();
         assert_eq!(losing.first_error.as_deref(), Some("first no"));
 
-        // Taken with the frame, so a later one does not repeat it - while
-        // the result still reports the run's first.
+        // Taken with the frame, so a later one does not repeat it.
         assert_eq!(tally.take_completed().first_error, None);
-        let stats = tally.into_stats("c-0".to_string(), 3, None, 1, 1.0);
-        assert_eq!(stats.first_error.as_deref(), Some("first no"));
     }
 
     /// A tick with nothing new on it is not sent, so the only frame a
@@ -328,11 +311,8 @@ mod tests {
         assert_eq!(record["req_id"], "dispatcher-0");
         assert_eq!(record["dispatched"], 3);
         assert_eq!(record["succeeded"], 1);
-        assert_eq!(record["function_errors"], 1);
-        assert_eq!(record["transport_errors"], 1);
         assert_eq!(record["retried"], 3);
         assert_eq!(record["retry_wait_ms"], 0.0);
-        assert_eq!(record["first_error"], "bad input");
         assert_eq!(record["cold"], true);
         assert_eq!(record["connections"], 4);
         assert_eq!(record["elapsed_ms"], 12.5);

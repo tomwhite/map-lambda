@@ -49,19 +49,6 @@ pub enum Error {
     InvocationFailed(String),
 
     #[error(
-        "dispatcher {req_id} reported {} failed invocation(s) ({function_errors} function, \
-         {transport_errors} transport): {}",
-        function_errors + transport_errors,
-        first_error.as_deref().unwrap_or("None")
-    )]
-    InvocationsFailed {
-        req_id: String,
-        function_errors: usize,
-        transport_errors: usize,
-        first_error: Option<String>,
-    },
-
-    #[error(
         "dispatcher {req_id} completed {succeeded} of {expected} invocation(s) in its partition \
          with no error reported"
     )]

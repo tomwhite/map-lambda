@@ -101,11 +101,7 @@ def test_a_losing_run_keeps_the_answers_it_had_already_handed_over():
             [
                 completed(succeeded=1, outputs=[{"index": 0, "value": "a"}]),
                 completed(succeeded=1, outputs=[{"index": 1, "value": "b"}], first_error="boom"),
-                {
-                    "Summary": dispatcher_summary(
-                        2, dispatched=3, transport_errors=1, first_error="boom"
-                    )
-                },
+                {"Summary": dispatcher_summary(2, dispatched=3)},
             ]
         ]
     )
@@ -172,11 +168,7 @@ def test_an_abandoned_run_raises_nothing_however_it_went():
         [
             [
                 completed(succeeded=1, outputs=[{"index": 0, "value": "first"}]),
-                {
-                    "Summary": dispatcher_summary(
-                        1, dispatched=2, transport_errors=1, first_error="boom"
-                    )
-                },
+                {"Summary": dispatcher_summary(1, dispatched=2)},
             ]
         ]
     )
