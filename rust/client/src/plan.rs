@@ -45,13 +45,13 @@ pub(crate) fn shares(concurrency: usize, count: usize, local: bool) -> Result<Ve
     if count == 0 {
         return Err(Error::NoDispatchers);
     }
-    let (base, extra) = (concurrency / count, concurrency % count);
-    if base == 0 && extra == 0 {
+    if concurrency < count {
         return Err(Error::ConcurrencyTooSmall {
             concurrency,
             dispatchers: count,
         });
     }
+    let (base, extra) = (concurrency / count, concurrency % count);
     let carries = carried(local);
     let widest = base + usize::from(extra > 0);
     if widest > carries {
@@ -107,8 +107,10 @@ mod tests {
     /// Silently giving a dispatcher zero in flight would hang it.
     #[test]
     fn a_concurrency_too_small_to_split_is_refused() {
-        let refused = shares(0, 4, false).expect_err("refused");
-        assert!(refused.to_string().contains("too small to split"));
+        for concurrency in [0, 1, 3] {
+            let refused = shares(concurrency, 4, false).expect_err("refused");
+            assert!(refused.to_string().contains("too small to split"));
+        }
     }
 
     #[test]
