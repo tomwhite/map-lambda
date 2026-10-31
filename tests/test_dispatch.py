@@ -14,7 +14,7 @@ import pytest
 
 from map_lambda import Session
 
-from .fakes import RecordingInvoker, completed, dispatcher_summary
+from .fakes import RecordingInvoker, completed, dispatcher_body, dispatcher_summary
 from .utils import drain
 
 
@@ -354,6 +354,21 @@ def test_a_dispatcher_that_stops_partway_raises_rather_than_looking_done():
     unreported, which no count would show.
     """
     invoker = RecordingInvoker([[completed(succeeded=1)]])
+    session = _session(invoker, dispatchers=1)
+
+    with pytest.raises(RuntimeError, match="no summary frame"):
+        asyncio.run(session.for_each("worker", [1, 2], input_key="i"))
+
+
+def test_a_result_cut_off_partway_through_its_line_raises():
+    """
+    All the work is reported, but half a line is not a result.
+    """
+    invoker = RecordingInvoker()
+    body = invoker.respond()
+    whole = dispatcher_body(completed(succeeded=2), {"Summary": dispatcher_summary(2)})
+    body.write(whole[:-10])
+    body.close()
     session = _session(invoker, dispatchers=1)
 
     with pytest.raises(RuntimeError, match="no summary frame"):
