@@ -11,6 +11,7 @@ use aws_sdk_lambda::Client as LambdaClient;
 use futures::stream::StreamExt;
 use lambda_runtime::Error;
 use std::time::{Duration, Instant};
+use tokio::time::MissedTickBehavior;
 
 /// How often a partition reports what has finished since the last time.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
@@ -59,7 +60,6 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     callback.completed(tally.take_completed()).await?;
 
     let started = Instant::now();
-    let mut last_report = Instant::now();
     // The invocations, started only as the loop below polls them.
     let mut results = futures::stream::iter(inputs.into_iter().enumerate())
         .map(|(i, input)| {
@@ -74,12 +74,25 @@ pub(crate) async fn dispatch<S: ReportCallback>(
         })
         .buffer_unordered(max_in_flight);
 
+    let mut report = tokio::time::interval_at(
+        tokio::time::Instant::now() + REPORT_INTERVAL,
+        REPORT_INTERVAL,
+    );
+    report.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     // Each invocation as it finishes, reporting to the callback on a timer.
-    while let Some((index, invocation)) = results.next().await {
-        tally.observe(index, invocation);
-        if last_report.elapsed() >= REPORT_INTERVAL {
-            callback.completed(tally.take_completed()).await?;
-            last_report = Instant::now();
+    loop {
+        tokio::select! {
+            finished = results.next() => match finished {
+                Some((index, invocation)) => tally.observe(index, invocation),
+                None => break,
+            },
+            _ = report.tick() => {
+                let batch = tally.take_completed();
+                if !batch.is_empty() {
+                    callback.completed(batch).await?;
+                }
+            }
         }
     }
 
@@ -102,10 +115,18 @@ mod tests {
     use aws_sdk_lambda::config::Region;
     use aws_sdk_lambda::Client as LambdaClient;
     use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+    use aws_smithy_runtime_api::client::http::{
+        HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpConnector,
+    };
+    use aws_smithy_runtime_api::client::orchestrator::{HttpRequest, HttpResponse};
+    use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+    use aws_smithy_runtime_api::shared::IntoShared;
     use aws_smithy_types::body::SdkBody;
     use lambda_runtime::Error;
     use serde_json::json;
     use serde_json::Value;
+    use std::time::Duration;
+    use tokio::time::Instant;
 
     /// A callback that keeps what it was told instead of writing it.
     #[derive(Default)]
@@ -191,6 +212,78 @@ mod tests {
             .http_client(http_client)
             .build();
         vec![LambdaClient::from_conf(config)]
+    }
+
+    /// Lambda with a first input that returns at once and the rest after
+    /// `SLOW_WORKER`, which a test with a paused clock doesn't wait for.
+    #[derive(Debug, Clone)]
+    struct FirstInputIsFast {
+        fast: fn() -> http::Response<SdkBody>,
+    }
+
+    const SLOW_WORKER: Duration = Duration::from_secs(60);
+
+    impl HttpConnector for FirstInputIsFast {
+        fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+            let first = request
+                .body()
+                .bytes()
+                .is_some_and(|body| body.windows(7).any(|window| window == b"[[0,0]]"));
+            let fast = self.fast;
+            HttpConnectorFuture::new(async move {
+                let response = if first {
+                    fast()
+                } else {
+                    tokio::time::sleep(SLOW_WORKER).await;
+                    worker_ok()
+                };
+                Ok(HttpResponse::try_from(response).expect("a response"))
+            })
+        }
+    }
+
+    impl HttpClient for FirstInputIsFast {
+        fn http_connector(
+            &self,
+            _: &HttpConnectorSettings,
+            _: &RuntimeComponents,
+        ) -> SharedHttpConnector {
+            self.clone().into_shared()
+        }
+    }
+
+    fn first_input_is_fast(fast: fn() -> http::Response<SdkBody>) -> Vec<LambdaClient> {
+        vec![LambdaClient::from_conf(
+            aws_sdk_lambda::Config::builder()
+                .behavior_version(aws_sdk_lambda::config::BehaviorVersion::latest())
+                .region(Region::new("eu-west-1"))
+                .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                .retry_config(RetryConfig::disabled())
+                .http_client(FirstInputIsFast { fast })
+                .build(),
+        )]
+    }
+
+    /// When each frame went out, against a paused clock.
+    struct Timed {
+        started: Instant,
+        frames: Vec<(Duration, Completed)>,
+    }
+
+    impl Timed {
+        fn new() -> Self {
+            Self {
+                started: Instant::now(),
+                frames: Vec::new(),
+            }
+        }
+    }
+
+    impl ReportCallback for Timed {
+        async fn completed(&mut self, completed: Completed) -> Result<(), Error> {
+            self.frames.push((self.started.elapsed(), completed));
+            Ok(())
+        }
     }
 
     fn a_request(inputs: usize) -> Request {
@@ -402,6 +495,70 @@ mod tests {
         assert_eq!(callback.frames.len(), 2);
         let reported = callback.frames[1].first_error.as_deref();
         assert!(reported.expect("a message").contains("boom"));
+    }
+
+    /// An output must not depend on a slower worker to carry it out: the
+    /// dispatcher could die first, and the client would never see it.
+    #[tokio::test(start_paused = true)]
+    async fn an_output_goes_out_while_another_invocation_is_still_running() {
+        let lambda_clients = first_input_is_fast(worker_ok);
+        let mut callback = Timed::new();
+
+        dispatch(
+            a_request(2),
+            "c-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        let (at, frame) = &callback.frames[1];
+        assert_eq!(frame.outputs.len(), 1);
+        assert!(*at < SLOW_WORKER, "the output waited until {at:?}");
+    }
+
+    /// The client stops a call on its first failure, so holding one back
+    /// bills for all the work that follows.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_goes_out_while_another_invocation_is_still_running() {
+        let lambda_clients = first_input_is_fast(worker_failed);
+        let mut callback = Timed::new();
+
+        dispatch(
+            a_request(2),
+            "c-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        let (at, frame) = &callback.frames[1];
+        assert!(frame.first_error.is_some());
+        assert!(*at < SLOW_WORKER, "the failure waited until {at:?}");
+    }
+
+    /// Ticks with nothing to report cost nothing on the wire.
+    #[tokio::test(start_paused = true)]
+    async fn a_long_wait_with_nothing_new_sends_no_frames() {
+        let lambda_clients = first_input_is_fast(worker_ok);
+        let mut callback = Timed::new();
+
+        dispatch(
+            a_request(2),
+            "c-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        // The opening frame, the fast worker and the slow one.
+        assert_eq!(callback.frames.len(), 3);
     }
 
     #[tokio::test]

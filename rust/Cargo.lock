@@ -1528,6 +1528,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-lambda",
  "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
  "aws-smithy-types",
  "fastrand",
  "futures",
