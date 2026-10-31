@@ -12,8 +12,9 @@ use lambda_runtime::{Error, LambdaEvent};
 
 /// Send one frame as a JSON line.
 ///
-/// Fails when the client has gone; the caller then aborts the body
-/// rather than leave a stream that looks complete.
+/// Fails if the runtime stops reading the body, which a client going away
+/// does not cause; the caller then aborts the body rather than leave a
+/// stream that looks complete.
 async fn send(tx: &mut Sender, frame: &Frame) -> Result<(), Error> {
     let mut line = serde_json::to_vec(frame)?;
     line.push(b'\n');

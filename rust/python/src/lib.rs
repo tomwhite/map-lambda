@@ -190,7 +190,7 @@ impl Batches {
         })
     }
 
-    /// Tear down whatever dispatchers are still running.
+    /// Close the streams of whatever dispatchers are still running.
     fn close(&self) {
         drop(self.batches.lock().expect("unpoisoned").take());
     }

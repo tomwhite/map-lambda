@@ -80,7 +80,8 @@ pub struct Record<T> {
 }
 
 /// A call's batches as they arrive. It ends with an error if the call
-/// fails; dropping it tears down the dispatchers still running.
+/// fails; dropping it closes the dispatchers' streams, as
+/// [`Session::map_unordered`](crate::Session::map_unordered) describes.
 pub type Batches = BoxStream<'static, Result<Batch, Error>>;
 
 /// Start `inputs` through `call.dispatchers` dispatchers.

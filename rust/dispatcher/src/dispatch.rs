@@ -19,8 +19,7 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Somewhere to report what a partition has finished, as it runs.
 ///
-/// An `Err` means there is no one left to report to, and the partition
-/// stops.
+/// An `Err` means the report cannot be delivered, and the partition stops.
 pub(crate) trait ReportCallback {
     async fn completed(&mut self, completed: Completed) -> Result<(), Error>;
 }
@@ -76,7 +75,7 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     // Atomic because the handler's spawned task has to be `Send`.
     let in_flight: Vec<AtomicUsize> = (0..connections).map(|_| AtomicUsize::new(0)).collect();
     let in_flight = in_flight.as_slice();
-    // The call can no longer succeed, and the client going away may never
+    // The call can no longer succeed, and the client going away will not
     // reach this dispatcher.
     let failed = AtomicBool::new(false);
     let failed = &failed;

@@ -102,14 +102,14 @@ The call fails with a `RuntimeError` in any of the following cases:
 - if the stream does not end with a summary frame,
 - or if the dispatcher fails.
 
-Once an invocation has failed, its dispatcher starts no more. Those already running finish, and other dispatchers carry on until they find the client has gone.
+Once an invocation has failed, its dispatcher starts no more. Those already running finish, and other dispatchers run the rest of their partitions.
 
 ## Out of scope
 
 What is not guaranteed by the framework.
 
 - **Dispatcher retries**. There is no mechanism for retrying dispatchers. If a dispatcher fails then the call will fail and will need to be re-run by the client.
-- **Cancellation**. There is no cancellation mechanism, so once lambdas have started they will continue running in AWS. This can happen if the client fails or any of the connections to the dispatchers fail.
+- **Cancellation**. There is no cancellation mechanism, so once lambdas have started they will continue running in AWS. This can happen if the client fails or any of the connections to the dispatchers fail. A dispatcher does not find out that the client has gone, so stopping a call early still runs, and bills for, the rest of each partition.
 - **Payload validation**. It is up to the user to ensure that the deployed lambda function matches the Python frontend. A mismatch will be treated as a deserialisation error in the worker for each invocation.
 
 <!-- --8<-- [end:using] -->
