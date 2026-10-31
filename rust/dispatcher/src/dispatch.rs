@@ -4,13 +4,13 @@
 //! Knows nothing about response streaming: reports go out through
 //! `ReportCallback`, so a test can record the frames instead.
 
-use crate::invoke::{invoke_with_retries, payload_for};
+use crate::invoke::{invoke_with_retries, payload_for, Outcome};
 use crate::protocol::{connections_for, Completed, DispatcherStats, Request};
 use crate::tally::{Return, Tally};
 use aws_sdk_lambda::Client as LambdaClient;
 use futures::stream::StreamExt;
 use lambda_runtime::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time::MissedTickBehavior;
 
@@ -76,8 +76,13 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     // Atomic because the handler's spawned task has to be `Send`.
     let in_flight: Vec<AtomicUsize> = (0..connections).map(|_| AtomicUsize::new(0)).collect();
     let in_flight = in_flight.as_slice();
+    // The call can no longer succeed, and the client going away may never
+    // reach this dispatcher.
+    let failed = AtomicBool::new(false);
+    let failed = &failed;
     // The invocations, started only as the loop below polls them.
     let mut results = futures::stream::iter(inputs.into_iter().enumerate())
+        .take_while(|_| std::future::ready(!failed.load(Ordering::Relaxed)))
         .map(|(i, input)| {
             let body = payload_for(&constant_args, &input_key, input);
             let connection = least_busy(in_flight);
@@ -87,6 +92,9 @@ pub(crate) async fn dispatch<S: ReportCallback>(
             async move {
                 let invocation = invoke_with_retries(client, worker, body, retries).await;
                 in_flight[connection].fetch_sub(1, Ordering::Relaxed);
+                if !matches!(invocation.outcome, Outcome::Ok { .. }) {
+                    failed.store(true, Ordering::Relaxed);
+                }
                 // `buffer_unordered` yields in completion order.
                 (i, invocation)
             }
@@ -519,8 +527,8 @@ mod tests {
         assert!(opening.is_empty());
     }
 
-    /// A failed worker does not stop the partition: the dispatcher
-    /// reports it and dispatches on, and the client is what raises.
+    /// A failed worker does not end the partition: the dispatcher reports
+    /// it and waits for what is in flight, and the client is what raises.
     #[tokio::test]
     async fn a_failed_invocation_is_reported_rather_than_returned() {
         let lambda_clients = replaying(vec![worker_ok(), worker_failed()]);
@@ -542,6 +550,25 @@ mod tests {
             .iter()
             .find_map(|frame| frame.first_error.as_deref());
         assert!(reported.expect("a message").contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_invocation_starts_no_more() {
+        let lambda_clients = replaying(vec![worker_failed(), worker_ok(), worker_ok()]);
+        let mut request = a_request(3);
+        request.max_in_flight = 1;
+
+        let stats = dispatch(
+            request,
+            "dispatcher-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut Recorder::default(),
+        )
+        .await
+        .expect("dispatched");
+
+        assert_eq!(stats.succeeded, 0);
     }
 
     /// A failure can be the whole of a frame: nothing succeeded
@@ -599,7 +626,7 @@ mod tests {
         let lambda_clients = first_input_is_fast(worker_failed);
         let mut callback = Timed::new();
 
-        dispatch(
+        let stats = dispatch(
             a_request(2),
             "c-0".into(),
             &lambda_clients,
@@ -612,6 +639,7 @@ mod tests {
         let (at, frame) = &callback.frames[1];
         assert!(frame.first_error.is_some());
         assert!(*at < SLOW_WORKER, "the failure waited until {at:?}");
+        assert_eq!(stats.succeeded, 1, "what was in flight still finishes");
     }
 
     /// Ticks with nothing to report cost nothing on the wire.

@@ -102,6 +102,8 @@ The call fails with a `RuntimeError` in any of the following cases:
 - if the stream does not end with a summary frame,
 - or if the dispatcher fails.
 
+Once an invocation has failed, its dispatcher starts no more. Those already running finish, and other dispatchers carry on until they find the client has gone.
+
 ## Out of scope
 
 What is not guaranteed by the framework.
