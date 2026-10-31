@@ -165,6 +165,19 @@ def test_every_partitions_record_is_kept_when_one_of_them_comes_up_short():
     assert len(collected) == 2
 
 
+def test_a_result_is_not_taken_on_trust_for_frames_that_never_came():
+    """Only the frames carry outputs, so success has to rest on them."""
+    invoker = RecordingInvoker(
+        [
+            [completed(succeeded=4), {"Summary": dispatcher_summary(5)}],
+            dispatcher_summary(5),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="completed 4 of 5"):
+        _map(invoker)
+
+
 def test_a_failed_invocation_stops_the_call_before_any_dispatcher_record():
     """Waiting for them would bill for work whose call has already failed."""
     invoker = RecordingInvoker(

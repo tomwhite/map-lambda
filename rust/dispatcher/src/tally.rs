@@ -213,8 +213,8 @@ mod tests {
     }
 
     /// The client sums the frames and checks the total against the
-    /// result, so what the frames account for must be exactly the
-    /// partition - no double counting, and nothing left behind.
+    /// inputs it sent, so what the frames account for must be exactly
+    /// the partition - no double counting, and nothing left behind.
     #[test]
     fn the_frames_add_up_to_the_count_the_result_reports() {
         let mut tally = returning_everything();
