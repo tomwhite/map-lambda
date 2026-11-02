@@ -91,7 +91,7 @@ Map-lambda provides **diagnostics** in the form of progress updates as the `map_
 
 ## Failures and retries
 
-A lambda function is retried only if there is a transport error - where the request may not have reached the worker. (Note that the client can't tell if the worker ran successfully or not - retrying is permitted only because the function is idempotent.)
+A lambda function is retried only if there is a transport error - where the request may not have reached the worker. (Note that the client can't tell if the worker ran successfully or not - retrying is permitted only because the function is idempotent.) An error that another attempt can't change, like a missing permission or function, is not retried, so the call fails straight away.
 
 The number of retries is set by the `retries` argument to the call, and defaults to 2. If the worker returns an `Error` it is *not* retried; it is assumed that the worker function will retry I/O errors itself.
 

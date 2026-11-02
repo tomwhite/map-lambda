@@ -95,7 +95,7 @@ impl Tally {
                 self.function_errors += 1;
                 self.remember(message);
             }
-            Outcome::Transport(message) => {
+            Outcome::Transport(message) | Outcome::Rejected(message) => {
                 self.transport_errors += 1;
                 self.remember(message);
             }
