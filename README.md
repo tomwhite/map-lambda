@@ -144,7 +144,7 @@ A worker that reads or writes S3 needs its own policy on `map-lambda-worker-role
 
 ```shell
 cd rust
-cargo lambda build --release --arm64  # every crate: echo and dispatcher
+cargo lambda build --release --arm64 --package echo --package map-lambda-dispatcher
 
 # --role takes an ARN rather than a name, so ask IAM for it
 worker_role=$(aws iam get-role --role-name map-lambda-worker-role --query Role.Arn --output text)
@@ -187,7 +187,7 @@ The Python package is built with [maturin](https://www.maturin.rs/), so a Rust t
 
 In the `rust/` directory:
 
-`cargo lambda build`
+`cargo lambda build --package echo --package map-lambda-dispatcher`
 
 `cargo test` runs the Rust unit tests for every crate in the workspace.
 
