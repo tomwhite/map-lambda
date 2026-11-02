@@ -1,6 +1,6 @@
 """
-The session: what a `Lambdas` sends its dispatchers, and what
-`map_unordered`, `for_each` and `invoke` give back.
+The session: what a `Session` sends its dispatchers, and what
+`map_unordered`, `for_each` and `invoke_detached` give back.
 """
 
 import asyncio
@@ -10,34 +10,34 @@ import pytest
 
 from map_lambda import api
 
-from .fakes import RecordingClient, completed, dispatcher_result
+from .fakes import RecordingInvoker, completed, dispatcher_summary
 from .utils import drain, mapped
 
 
-def _session(client: RecordingClient, **settings: Any) -> api.Lambdas:
-    """A `Lambdas` whose Lambda client answers without invoking anything."""
-    lambdas = api.Lambdas(**{"dispatchers": 1, "concurrency": 4, **settings})
-    lambdas._client = client
-    return lambdas
+def _session(invoker: RecordingInvoker, **settings: Any) -> api.Session:
+    """A `Session` whose invoker responds without invoking anything."""
+    session = api.Session(**{"dispatchers": 1, "concurrency": 4, **settings})
+    session._invoker = invoker
+    return session
 
 
-def _dispatching_to(monkeypatch: pytest.MonkeyPatch, client: RecordingClient) -> None:
+def _dispatching_to(monkeypatch: pytest.MonkeyPatch, invoker: RecordingInvoker) -> None:
     """Have every session built from here on use `client`."""
 
     async def ready(*args: Any, **kwargs: Any) -> Any:
-        return client
+        return invoker
 
     monkeypatch.setattr(api._native, "connect", ready)
 
 
-def _answering(*answers: Any) -> RecordingClient:
-    """One dispatcher answering input `i` with `answers[i]`."""
-    outputs = [{"index": i, "response": answer} for i, answer in enumerate(answers)]
-    return RecordingClient(
+def _returning(*outputs: Any) -> RecordingInvoker:
+    """One dispatcher returning for input `i` with `outputs[i]`."""
+    frame_outputs = [{"index": i, "value": output} for i, output in enumerate(outputs)]
+    return RecordingInvoker(
         [
             [
-                completed(done=len(answers), outputs=outputs),
-                {"Result": dispatcher_result(len(answers))},
+                completed(succeeded=len(outputs), outputs=frame_outputs),
+                {"Summary": dispatcher_summary(len(outputs))},
             ]
         ]
     )
@@ -45,110 +45,112 @@ def _answering(*answers: Any) -> RecordingClient:
 
 def test_a_session_without_a_client_says_so_rather_than_failing_later():
     with pytest.raises(RuntimeError, match="async with"):
-        api.Lambdas().map_unordered("worker", [1], input_key="i")
+        api.Session().map_unordered("worker", [1], input_key="i")
 
 
 def test_map_yields_each_answer_and_records_the_partition():
     partitions: list[dict] = []
-    lambdas = _session(_answering({"doubled": 2}, {"doubled": 4}), dispatcher_stats=partitions)
+    session = _session(_returning({"doubled": 2}, {"doubled": 4}), dispatcher_stats=partitions)
 
-    answers = mapped(lambdas, "worker", [1, 2], input_key="i")
+    outputs = mapped(session, "worker", [1, 2], input_key="i")
 
-    assert answers == [{"doubled": 2}, {"doubled": 4}]
+    assert outputs == [{"doubled": 2}, {"doubled": 4}]
     assert len(partitions) == 1
     assert partitions[0]["succeeded"] == 2
 
 
 def test_map_passes_the_template_and_the_session_settings_through():
-    client = RecordingClient([dispatcher_result(1)])
-    lambdas = _session(client, concurrency=6, retries=3)
+    invoker = RecordingInvoker([dispatcher_summary(1)])
+    session = _session(invoker, concurrency=6, retries=3)
 
-    mapped(lambdas, "worker", [[0, 1]], input_key="items", constant_args={"prefix": "p"})
+    mapped(session, "worker", [[0, 1]], input_key="items", constant_args={"prefix": "p"})
 
-    request = client.payloads[0]
-    assert request["target_function"] == "worker"
-    assert request["template"] == {"prefix": "p"}
+    request = invoker.payloads[0]
+    assert request["worker_function"] == "worker"
+    assert request["constant_args"] == {"prefix": "p"}
     assert request["input_key"] == "items"
     assert request["retries"] == 3
-    assert request["concurrency"] == 6
+    assert request["max_in_flight"] == 6
 
 
 def test_a_list_input_is_sent_whole_as_one_input():
     """However many items a worker reads out of it."""
-    client = RecordingClient([dispatcher_result(2)])
+    invoker = RecordingInvoker([dispatcher_summary(2)])
 
-    mapped(_session(client), "worker", [[0, 1, 2], [3]], input_key="items")
+    mapped(_session(invoker), "worker", [[0, 1, 2], [3]], input_key="items")
 
-    assert client.payloads[0]["inputs"] == [[0, 1, 2], [3]]
+    assert invoker.payloads[0]["inputs"] == [[0, 1, 2], [3]]
 
 
 def test_for_each_dispatches_every_input_and_returns_nothing():
-    client = RecordingClient([dispatcher_result(2), dispatcher_result(2)])
-    lambdas = _session(client, dispatchers=2)
+    invoker = RecordingInvoker([dispatcher_summary(2), dispatcher_summary(2)])
+    session = _session(invoker, dispatchers=2)
 
-    result = asyncio.run(lambdas.for_each("worker", [1, 2, 3, 4], input_key="i"))
+    result = asyncio.run(session.for_each("worker", [1, 2, 3, 4], input_key="i"))
 
     assert result is None
-    assert [r["inputs"] for r in client.payloads] == [[1, 3], [2, 4]]
+    assert [r["inputs"] for r in invoker.payloads] == [[1, 3], [2, 4]]
 
 
 def test_for_each_still_collects_invocation_records():
     stats = [
         {"index": i, "req_id": f"w-{i}", "invoke_start": 1.0, "invoke_end": 2.0} for i in (0, 1)
     ]
-    client = RecordingClient([[completed(done=2, stats=stats), {"Result": dispatcher_result(2)}]])
+    invoker = RecordingInvoker(
+        [[completed(succeeded=2, invocation_stats=stats), {"Summary": dispatcher_summary(2)}]]
+    )
     records: list[dict] = []
-    lambdas = _session(client, invocation_stats=records)
+    session = _session(invoker, invocation_stats=records)
 
-    asyncio.run(lambdas.for_each("worker", [1, 2], input_key="i"))
+    asyncio.run(session.for_each("worker", [1, 2], input_key="i"))
 
     assert [r["req_id"] for r in records] == ["w-0", "w-1"]
 
 
 def test_a_worker_may_have_fields_named_after_maps_own_arguments():
-    client = RecordingClient([dispatcher_result(1)])
+    invoker = RecordingInvoker([dispatcher_summary(1)])
 
     mapped(
-        _session(client),
+        _session(invoker),
         "worker",
         [1],
         input_key="i",
         constant_args={"input_key": "not mine", "grouped": "nor this", "inputs": 7},
     )
 
-    assert client.payloads[0]["template"] == {
+    assert invoker.payloads[0]["constant_args"] == {
         "input_key": "not mine",
         "grouped": "nor this",
         "inputs": 7,
     }
-    assert client.payloads[0]["input_key"] == "i"
+    assert invoker.payloads[0]["input_key"] == "i"
 
 
 def test_mistyping_one_of_maps_own_arguments_raises():
-    lambdas = _session(RecordingClient())
+    session = _session(RecordingInvoker())
 
     with pytest.raises(TypeError, match="groupd"):
-        lambdas.map_unordered("worker", [[0, 1]], input_key="items", groupd=True)  # type: ignore[call-arg]
+        session.map_unordered("worker", [[0, 1]], input_key="items", groupd=True)  # type: ignore[call-arg]
 
 
 def test_the_module_level_map_runs_one_call_through_a_session_of_its_own(monkeypatch):
-    client = _answering({"doubled": 2}, {"doubled": 4})
-    _dispatching_to(monkeypatch, client)
+    invoker = _returning({"doubled": 2}, {"doubled": 4})
+    _dispatching_to(monkeypatch, invoker)
 
-    answers = drain(
+    outputs = drain(
         api.map_unordered(
             "worker", [1, 2], input_key="i", constant_args={"prefix": "p"}, dispatchers=1
         )
     )
 
-    assert answers == [(0, {"doubled": 2}), (1, {"doubled": 4})]
-    assert client.payloads[0]["template"] == {"prefix": "p"}
-    assert client.payloads[0]["target_function"] == "worker"
+    assert outputs == [(0, {"doubled": 2}), (1, {"doubled": 4})]
+    assert invoker.payloads[0]["constant_args"] == {"prefix": "p"}
+    assert invoker.payloads[0]["worker_function"] == "worker"
 
 
 def test_the_module_level_map_collects_stats_into_the_caller_s_own_lists(monkeypatch):
     """The session closes before this returns, so only the lists outlive it."""
-    _dispatching_to(monkeypatch, RecordingClient([dispatcher_result(2)]))
+    _dispatching_to(monkeypatch, RecordingInvoker([dispatcher_summary(2)]))
     partitions: list[dict] = []
 
     drain(
@@ -163,8 +165,8 @@ def test_the_module_level_map_collects_stats_into_the_caller_s_own_lists(monkeyp
 
 
 def test_the_module_level_for_each_runs_one_call_through_a_session_of_its_own(monkeypatch):
-    client = RecordingClient([dispatcher_result(2), dispatcher_result(1)])
-    _dispatching_to(monkeypatch, client)
+    invoker = RecordingInvoker([dispatcher_summary(2), dispatcher_summary(1)])
+    _dispatching_to(monkeypatch, invoker)
 
     asyncio.run(
         api.for_each(
@@ -180,51 +182,51 @@ def test_the_module_level_for_each_runs_one_call_through_a_session_of_its_own(mo
         )
     )
 
-    assert [r["inputs"] for r in client.payloads] == [[1, 3], [2]]
-    assert [r["concurrency"] for r in client.payloads] == [25, 25]
-    assert client.payloads[0]["retries"] == 3
-    assert client.payloads[0]["template"] == {"prefix": "p"}
-    assert client.payloads[0]["target_function"] == "worker"
+    assert [r["inputs"] for r in invoker.payloads] == [[1, 3], [2]]
+    assert [r["max_in_flight"] for r in invoker.payloads] == [25, 25]
+    assert invoker.payloads[0]["retries"] == 3
+    assert invoker.payloads[0]["constant_args"] == {"prefix": "p"}
+    assert invoker.payloads[0]["worker_function"] == "worker"
     # The one thing that distinguishes `for_each` on the wire: a worker's
     # body is dropped at the dispatcher, not carried back and discarded.
-    assert client.payloads[0]["return_outputs"] is False
+    assert invoker.payloads[0]["return_outputs"] is False
 
 
 def test_the_module_level_map_offers_every_session_setting_under_the_same_default():
     """
-    `map_unordered` spells `Lambdas`' settings out rather than taking
+    `map_unordered` spells `Session`' settings out rather than taking
     `**kwargs`, so a setting added to one and forgotten in the other
     shows up here.
     """
     import dataclasses
     import inspect
 
-    settings = {f.name: f.default for f in dataclasses.fields(api.Lambdas) if f.init}
+    settings = {f.name: f.default for f in dataclasses.fields(api.Session) if f.init}
     params = inspect.signature(api.map_unordered).parameters
 
-    assert set(settings) <= set(params), "a Lambdas setting map_unordered cannot pass"
+    assert set(settings) <= set(params), "a Session setting map_unordered cannot pass"
     assert {name: params[name].default for name in settings} == settings
 
 
 def test_invoke_dispatches_once_without_waiting_for_the_answer():
-    client = RecordingClient()
-    lambdas = _session(client)
+    invoker = RecordingInvoker()
+    session = _session(invoker)
 
-    asyncio.run(lambdas.invoke("delete-scratch", store="s3://bucket/scratch"))
+    asyncio.run(session.invoke_detached("delete-scratch", store="s3://bucket/scratch"))
 
-    assert client.invoked == [("delete-scratch", {"store": "s3://bucket/scratch"})]
+    assert invoker.invoked == [("delete-scratch", {"store": "s3://bucket/scratch"})]
     # not dispatch: no partition went out
-    assert client.payloads == []
+    assert invoker.payloads == []
 
 
 def test_invoke_is_not_counted_as_a_call():
-    client = RecordingClient([dispatcher_result(1)])
+    invoker = RecordingInvoker([dispatcher_summary(1)])
     stats: list[dict[str, Any]] = []
-    lambdas = _session(client, dispatcher_stats=stats)
+    session = _session(invoker, dispatcher_stats=stats)
 
     async def invoke_then_call() -> None:
-        await lambdas.invoke("delete-scratch")
-        await lambdas.for_each("worker", [0], input_key="i")
+        await session.invoke_detached("delete-scratch")
+        await session.for_each("worker", [0], input_key="i")
 
     asyncio.run(invoke_then_call())
 
@@ -232,12 +234,12 @@ def test_invoke_is_not_counted_as_a_call():
 
 
 def test_invoke_raises_when_it_could_not_be_submitted():
-    """Submission is the only failure `invoke` can see, so it has to raise."""
+    """Submission is the only failure `invoke_detached` can see, so it has to raise."""
 
     async def invoke_nowhere() -> None:
         # Nothing listens on the discard port, so the connection is refused.
-        async with api.Lambdas(endpoint_url="http://127.0.0.1:9") as lambdas:
-            await lambdas.invoke("delete-scratch", store="s3://bucket/scratch")
+        async with api.Session(endpoint_url="http://127.0.0.1:9") as session:
+            await session.invoke_detached("delete-scratch", store="s3://bucket/scratch")
 
     with pytest.raises(RuntimeError, match="could not reach Lambda"):
         asyncio.run(invoke_nowhere())
@@ -245,4 +247,4 @@ def test_invoke_raises_when_it_could_not_be_submitted():
 
 def test_invoke_without_a_client_says_so_rather_than_failing_later():
     with pytest.raises(RuntimeError, match="async with"):
-        asyncio.run(api.Lambdas().invoke("delete-scratch", store="s3://bucket/scratch"))
+        asyncio.run(api.Session().invoke_detached("delete-scratch", store="s3://bucket/scratch"))

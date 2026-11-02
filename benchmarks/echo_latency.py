@@ -24,7 +24,7 @@ import asyncio
 import time
 from typing import Any
 
-from map_lambda import LOCAL_ENDPOINT_URL, Lambdas
+from map_lambda import LOCAL_ENDPOINT_URL, Session
 from map_lambda import stats as stats_module
 
 ECHO_FUNCTION = "echo"
@@ -35,18 +35,18 @@ ECHO_PATH = "/tmp/map-lambda-echo"
 
 
 async def run(args: argparse.Namespace) -> tuple[float, list[dict], list[Any]]:
-    """One round of invocations, returning the wall clock, the records and the answers."""
+    """One round of invocations, returning the wall clock, the records and the outputs."""
     invocations: list[dict] = []
-    async with Lambdas(
+    async with Session(
         endpoint_url=args.endpoint_url or (LOCAL_ENDPOINT_URL if args.local else None),
         dispatchers=args.dispatchers,
         concurrency=args.concurrency,
         invocation_stats=invocations,
-    ) as lambdas:
+    ) as session:
         started = time.monotonic()
-        answers = [
-            answer
-            async for _, answer in lambdas.map_unordered(
+        outputs = [
+            output
+            async for _, output in session.map_unordered(
                 ECHO_FUNCTION,
                 list(range(args.invocations)),
                 input_key="i",
@@ -55,7 +55,7 @@ async def run(args: argparse.Namespace) -> tuple[float, list[dict], list[Any]]:
                 constant_args={"path": ECHO_PATH, "default_sleep": 0.0},
             )
         ]
-        return time.monotonic() - started, invocations, answers
+        return time.monotonic() - started, invocations, outputs
 
 
 def main() -> None:
@@ -77,7 +77,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    elapsed, invocations, answers = asyncio.run(run(args))
+    elapsed, invocations, outputs = asyncio.run(run(args))
     where = args.endpoint_url or ("local" if args.local else "AWS")
     print(
         f"{args.invocations} echo invocations, {where}, concurrency {args.concurrency}, "
@@ -88,7 +88,7 @@ def main() -> None:
         stats_module.write_jsonl(invocations, args.jsonl)
         print(f"wrote {len(invocations)} records to {args.jsonl}")
     # echo returns its input
-    assert sorted(answer["i"] for answer in answers) == list(range(args.invocations))
+    assert sorted(output["i"] for output in outputs) == list(range(args.invocations))
 
 
 if __name__ == "__main__":

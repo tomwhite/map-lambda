@@ -1,24 +1,24 @@
 //! Fan work out to AWS Lambda through dispatcher lambdas: the client.
 //!
-//! A [`Lambdas`] session partitions a call's inputs across dispatchers,
+//! A [`Session`] partitions a call's inputs across dispatchers,
 //! which invoke the workers from inside AWS and stream back [`Batch`]es of
 //! what finished.
 //!
 //! ```no_run
 //! use futures::StreamExt;
-//! use map_lambda_client::{Lambdas, Settings};
+//! use map_lambda_client::{Session, Settings};
 //! use serde_json::{json, Map};
 //!
 //! # async fn example() -> Result<(), map_lambda_client::Error> {
 //! let mut settings = Settings::default();
 //! settings.concurrency = 500;
-//! let lambdas = Lambdas::connect(None).await.with_settings(settings);
+//! let session = Session::connect(None).await.with_settings(settings);
 //!
 //! let inputs = (0..1_000).map(|i| json!(i)).collect();
-//! let mut run = lambdas.map_unordered("echo", inputs, "i", Map::new())?;
-//! while let Some(batch) = run.next().await {
-//!     for (index, answer) in batch?.answers {
-//!         println!("input {index} answered {answer}");
+//! let mut batches = session.map_unordered("echo", inputs, "i", Map::new())?;
+//! while let Some(batch) = batches.next().await {
+//!     for (index, output) in batch?.outputs {
+//!         println!("input {index} returned {output}");
 //!     }
 //! }
 //! # Ok(())
@@ -27,21 +27,21 @@
 #![warn(missing_docs)]
 
 // - `plan` - how a call is divided, decided before anything is invoked.
-// - `transport` - how a request reaches a dispatcher, behind a trait.
+// - `invoker` - how a request reaches a dispatcher, behind a trait.
 // - `frames` - a response body back into frames.
-// - `run` - one call.
+// - `call` - one call.
 // - `session` - the settings calls run with, and the calls themselves.
 // - `testing` - a stand-in for Lambda.
 
+mod call;
 mod error;
 mod frames;
+mod invoker;
 mod plan;
-mod run;
 mod session;
 pub mod testing;
-mod transport;
 
+pub use call::{Batch, Batches, DispatcherStats, InvocationStats, Record};
 pub use error::Error;
-pub use run::{Batch, DispatcherStats, InvocationStats, Record, Run};
-pub use session::{Lambdas, Settings, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION};
-pub use transport::{Chunks, Lambda, Transport, LOCAL_ENDPOINT_URL};
+pub use invoker::{connect, Chunks, Invoker, LOCAL_ENDPOINT_URL};
+pub use session::{Session, Settings, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION};

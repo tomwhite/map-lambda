@@ -1,20 +1,20 @@
 """
-What a run recorded about itself, and how to render it.
+What calls recorded about themselves, and how to render it.
 
 Two kinds of record, one per level, each collected only when a caller
-passes [`Lambdas`][map_lambda.Lambdas] a list:
+passes [`Session`][map_lambda.Session] a list:
 
-* [`dispatcher_stats`][map_lambda.Lambdas.dispatcher_stats] - one per
+* [`dispatcher_stats`][map_lambda.Session.dispatcher_stats] - one per
   dispatcher invocation, i.e. per partition per call.
   [`summarize_dispatchers`][map_lambda.stats.summarize_dispatchers] renders them.
-* [`invocation_stats`][map_lambda.Lambdas.invocation_stats] - one per worker
+* [`invocation_stats`][map_lambda.Session.invocation_stats] - one per worker
   invocation, built by the dispatcher only when asked (`return_stats`), and
-  arriving on the frames as the run goes.
+  arriving on the frames as the call goes.
   [`summarize_invocations`][map_lambda.stats.summarize_invocations] renders them.
 
 Every record carries `call`, the 0-based index of the
-[`map_unordered`][map_lambda.Lambdas.map_unordered] or
-[`for_each`][map_lambda.Lambdas.for_each] call it came from, and `call_start`,
+[`map_unordered`][map_lambda.Session.map_unordered] or
+[`for_each`][map_lambda.Session.for_each] call it came from, and `call_start`,
 `time.time()` when that call began. Records group by `call` because it is an
 index: two calls that read the same clock value would merge on a timestamp.
 
@@ -80,7 +80,7 @@ def summarize_invocations(
     max_pool_connections: int | None = None,
 ) -> str:
     """
-    A short human-readable summary of a run's invocation timings.
+    A short human-readable summary of invocation timings.
 
     `elapsed` is the caller's wall clock. Without it the wall time and
     rate are left out rather than derived from the records, whose span
@@ -121,7 +121,7 @@ def read_jsonl(path: str | Path) -> list[Stats]:
 
 def summarize_dispatchers(dispatcher_stats: list[Stats]) -> str:
     """
-    A short human-readable summary of a run's dispatchers.
+    A short human-readable summary of dispatchers.
     """
     if not dispatcher_stats:
         return "dispatchers: none"
@@ -142,13 +142,13 @@ def summarize_dispatchers(dispatcher_stats: list[Stats]) -> str:
         elapsed = [r.get("elapsed_ms", 0.0) for r in partitions]
         spreads.append((max(elapsed) - min(elapsed)) / 1000)
         widest = max(widest, sum(r.get("connections", 0) for r in partitions))
-    # A range when they differ: `split` can push one dispatcher over a
+    # A range when they differ: `shares` can push one dispatcher over a
     # 100-in-flight boundary and not the rest, and the smallest queues first.
     each = sorted({r.get("connections", 0) for r in dispatcher_stats})
     per_dispatcher = f"{each[0]}" if len(each) == 1 else f"{each[0]}-{each[-1]}"
     slowest = max(r.get("elapsed_ms", 0.0) for r in dispatcher_stats) / 1000
     share = f" ({100 * retried / dispatched:.2f}%)" if dispatched else ""
-    # Only when it happened: backoff turns throttling into a slower run
+    # Only when it happened: backoff turns throttling into a slower call
     # rather than a failed one, and nothing else here would say so.
     waiting = f", {waited:.1f}s of backoff" if waited else ""
     return (

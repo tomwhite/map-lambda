@@ -1,6 +1,6 @@
 """
-A Lambda client that answers however a test says, standing in for AWS
-behind the real client: `RecordingClient`, and the frames it replays.
+An invoker that responds however a test says, standing in for AWS
+behind the real client: `RecordingInvoker`, and the frames it replays.
 """
 
 import json
@@ -25,39 +25,42 @@ def dispatcher_body(*frames: Any) -> bytes:
 
 
 def completed(
-    done: int = 0, outputs: Any = (), stats: Any = (), first_error: str | None = None
+    succeeded: int = 0,
+    outputs: Any = (),
+    invocation_stats: Any = (),
+    first_error: str | None = None,
 ) -> dict[str, Any]:
     """
     One `Completed` frame: what a partition finished since its last one,
-    so `done` is a delta and the lists hold only what is new.
+    so `succeeded` is a delta and the lists hold only what is new.
 
     `first_error` is how a frame reports a failure, and the call raises
     on it.
     """
     return {
         "Completed": {
-            "done": done,
+            "succeeded": succeeded,
             "outputs": list(outputs),
-            "stats": list(stats),
+            "invocation_stats": list(invocation_stats),
             "first_error": first_error,
         }
     }
 
 
-def dispatcher_result(succeeded: int, **overrides: Any) -> dict[str, Any]:
+def dispatcher_summary(succeeded: int, **overrides: Any) -> dict[str, Any]:
     """
-    One dispatcher's result frame.
+    One dispatcher's summary frame.
 
     `succeeded` sets `dispatched` too, because the ordinary case is a
     partition that did all of its work; `**overrides` is how a test says
     otherwise, e.g. `transport_errors=1` for a failed one.
 
-    Answers and records are not here: they ride on the `Completed`
-    frames, and a result frame repeating them would be a second copy of
+    Outputs and records are not here: they ride on the `Completed`
+    frames, and a summary frame repeating them would be a second copy of
     the partition.
     """
     return {
-        "req_id": "coord-0",
+        "req_id": "dispatcher-0",
         "dispatched": succeeded,
         "succeeded": succeeded,
         "function_errors": 0,
@@ -72,15 +75,15 @@ def dispatcher_result(succeeded: int, **overrides: Any) -> dict[str, Any]:
     }
 
 
-class RecordingClient(_native.Stub):
+class RecordingInvoker(_native.Stub):
     """
     A Lambda client that records the requests it was sent and replays
     canned responses. Use it to assert **what went on the wire**, and to
     put a dispatcher into a state a real one is hard to provoke, like a
     short partition or a transport error.
 
-    Each canned response is either a result dict (`dispatcher_result`),
-    streamed as the frames accounting for its work and then the result,
+    Each canned response is either a summary dict (`dispatcher_summary`),
+    streamed as the frames accounting for its work and then the summary,
     or a list of frames to stream verbatim - which is how a test sends a
     stream that does *not* add up. For a body written as the test goes,
     take one from `respond()` instead.
@@ -92,8 +95,8 @@ class RecordingClient(_native.Stub):
                 frames = canned
             else:
                 frames = [
-                    completed(done=canned["succeeded"], first_error=canned.get("first_error")),
-                    {"Result": canned},
+                    completed(succeeded=canned["succeeded"], first_error=canned.get("first_error")),
+                    {"Summary": canned},
                 ]
             body = self.respond()
             body.write(dispatcher_body(*frames))
@@ -106,5 +109,5 @@ class RecordingClient(_native.Stub):
 
     @property
     def invoked(self) -> list[tuple[str, dict]]:
-        """One `(function, payload)` per `Lambdas.invoke`."""
-        return [(function, json.loads(payload)) for function, payload in self.invocations]
+        """One `(function_name, payload)` per `Session.invoke_detached`."""
+        return [(function_name, json.loads(payload)) for function_name, payload in self.invocations]

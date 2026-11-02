@@ -4,7 +4,7 @@
 
 ::: map_lambda.for_each
 
-::: map_lambda.Lambdas
+::: map_lambda.Session
 
 ::: map_lambda.LOCAL_ENDPOINT_URL
 

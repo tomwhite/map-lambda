@@ -7,7 +7,7 @@ LOCAL_ENDPOINT_URL: str
 MAX_STREAMS_PER_CONNECTION: int
 
 @final
-class Client: ...
+class Invoker: ...
 
 class Stub:
     def __init__(self, *args: Any, **kwargs: Any) -> None: ...
@@ -26,22 +26,22 @@ class Body:
 
 @final
 class Batch:
-    done: int
-    answers: list[tuple[int, Any]]
+    succeeded: int
+    outputs: list[tuple[int, Any]]
     invocation_stats: list[dict[str, Any]]
     dispatcher_stats: list[dict[str, Any]]
 
 @final
-class Run(AsyncIterator[Batch]):
-    def __aiter__(self) -> Run: ...
+class Batches(AsyncIterator[Batch]):
+    def __aiter__(self) -> Batches: ...
     async def __anext__(self) -> Batch: ...
     def close(self) -> None: ...
 
 class Session:
-    def __init__(self, client: Client | Stub, endpoint_url: str | None = None) -> None: ...
-    def dispatch(
+    def __init__(self, invoker: Invoker | Stub, endpoint_url: str | None = None) -> None: ...
+    def start(
         self,
-        function: str,
+        worker_function: str,
         inputs: list[Any],
         *,
         input_key: str,
@@ -52,7 +52,7 @@ class Session:
         retries: int,
         return_outputs: bool,
         return_stats: bool,
-    ) -> Run: ...
-    async def invoke(self, function: str, payload: str) -> None: ...
+    ) -> Batches: ...
+    async def invoke_detached(self, function_name: str, payload: str) -> None: ...
 
-async def connect(endpoint_url: str | None = None) -> Client: ...
+async def connect(endpoint_url: str | None = None) -> Invoker: ...

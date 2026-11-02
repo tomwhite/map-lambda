@@ -16,20 +16,20 @@ def _record(call_start, start, end, call=None, **extra):
     }
 
 
-def test_phases_group_by_the_batch_a_task_was_created_in():
+def test_by_call_groups_invocations_by_their_call():
     records = [
         _record(200.0, 200.1, 201.0),
         _record(100.0, 100.1, 101.0),
         _record(100.0, 100.2, 101.5),
     ]
-    grouped = timeline.phases(records)
+    grouped = timeline.by_call(records)
     assert [len(g) for g in grouped] == [2, 1]
     assert grouped[0][0]["call_start"] == 100.0
 
 
 def test_a_single_pass_run_is_one_phase():
     records = [_record(100.0, 100.0 + i, 101.0 + i) for i in range(5)]
-    assert len(timeline.phases(records)) == 1
+    assert len(timeline.by_call(records)) == 1
 
 
 def test_thin_keeps_everything_under_the_limit():
@@ -88,5 +88,5 @@ def test_phase_separators_are_only_drawn_for_a_multi_pass_run():
     single = [_record(100.0, 100.0 + i, 101.0 + i) for i in range(4)]
     multi = single + [_record(200.0, 200.0 + i, 201.0 + i) for i in range(4)]
     assert len(timeline.generate_timeline(single).axes[0].lines) == 0
-    # one axhline per phase, plus the legend's proxy line if present
+    # one axhline per call, plus the legend's proxy line if present
     assert len(timeline.generate_timeline(multi).axes[0].lines) == 2

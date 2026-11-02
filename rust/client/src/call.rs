@@ -2,13 +2,13 @@
 //! merged as they arrive, and every partition checked once all are in.
 
 use crate::frames::Framer;
-use crate::plan::{dispatchers_for, split, stride};
-use crate::transport::Transport;
+use crate::invoker::Invoker;
+use crate::plan::{dispatchers_for, partitions, shares};
 use crate::Error;
 use async_stream::try_stream;
 use futures::stream::{BoxStream, StreamExt};
-use map_lambda_protocol::{Frame, Request, Response, Stat, MAX_REQUEST_BYTES};
-pub use map_lambda_protocol::{Response as DispatcherStats, Stat as InvocationStats};
+pub use map_lambda_protocol::{DispatcherStats, InvocationStats};
+use map_lambda_protocol::{Frame, Request, MAX_REQUEST_BYTES};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -20,10 +20,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) struct Call {
     /// The name the dispatcher is deployed under.
     pub(crate) dispatcher_function: String,
-    pub(crate) target_function: String,
+    pub(crate) worker_function: String,
     pub(crate) input_key: String,
     /// The worker's payload, less its input.
-    pub(crate) template: Map<String, Value>,
+    pub(crate) constant_args: Map<String, Value>,
     /// `None` for the fewest that can hold `concurrency`.
     pub(crate) dispatchers: Option<usize>,
     /// Worker invocations in flight across the whole call.
@@ -35,7 +35,7 @@ pub(crate) struct Call {
     pub(crate) return_outputs: bool,
     pub(crate) return_stats: bool,
     /// Which call of its session this is, stamped on every record.
-    pub(crate) call: usize,
+    pub(crate) number: usize,
 }
 
 /// What arrived since the last batch, numbered against the caller's
@@ -44,10 +44,10 @@ pub(crate) struct Call {
 #[non_exhaustive]
 pub struct Batch {
     /// Invocations that came back successfully.
-    pub done: usize,
-    /// `(index into inputs, the worker's answer)`. Empty for a
-    /// `for_each`, and a worker that answered null has no entry.
-    pub answers: Vec<(usize, Box<RawValue>)>,
+    pub succeeded: usize,
+    /// `(index into inputs, the worker's output)`. Empty for a
+    /// `for_each`, and a worker that returned null has no entry.
+    pub outputs: Vec<(usize, Box<RawValue>)>,
     /// One per invocation, if [`Settings::return_stats`](crate::Settings::return_stats).
     pub invocation_stats: Vec<Record<InvocationStats>>,
     /// One per dispatcher, all in the last batch: they arrive before any
@@ -58,8 +58,8 @@ pub struct Batch {
 
 impl Batch {
     fn is_empty(&self) -> bool {
-        self.done == 0
-            && self.answers.is_empty()
+        self.succeeded == 0
+            && self.outputs.is_empty()
             && self.invocation_stats.is_empty()
             && self.dispatcher_stats.is_empty()
     }
@@ -80,36 +80,36 @@ pub struct Record<T> {
 
 /// A call's batches as they arrive. It ends with an error if the call
 /// fails; dropping it tears down the dispatchers still running.
-pub type Run = BoxStream<'static, Result<Batch, Error>>;
+pub type Batches = BoxStream<'static, Result<Batch, Error>>;
 
 /// Start `inputs` through `call.dispatchers` dispatchers.
 ///
 /// Refuses, with nothing invoked, a call that could not have worked: a
 /// split no dispatcher could carry, or a partition over Lambda's
 /// request limit.
-pub(crate) fn dispatch(
-    transport: Arc<dyn Transport>,
+pub(crate) fn start(
+    invoker: Arc<dyn Invoker>,
     call: Call,
     inputs: Vec<Value>,
-) -> Result<Run, Error> {
+) -> Result<Batches, Error> {
     let local = call.endpoint_url.is_some();
     let count = call
         .dispatchers
         .unwrap_or_else(|| dispatchers_for(call.concurrency, local));
-    let shares = split(call.concurrency, count, local)?;
-    let partitions = stride(inputs, count);
+    let shares = shares(call.concurrency, count, local)?;
+    let partitions = partitions(inputs, count);
     let expected: Vec<usize> = partitions.iter().map(Vec::len).collect();
 
     let payloads = partitions
         .into_iter()
         .zip(&shares)
-        .map(|(inputs, &concurrency)| {
+        .map(|(inputs, &max_in_flight)| {
             serde_json::to_vec(&Request {
-                target_function: call.target_function.clone(),
-                template: call.template.clone(),
+                worker_function: call.worker_function.clone(),
+                constant_args: call.constant_args.clone(),
                 inputs,
                 input_key: call.input_key.clone(),
-                concurrency,
+                max_in_flight,
                 endpoint_url: call.endpoint_url.clone(),
                 retries: call.retries,
                 return_stats: call.return_stats,
@@ -129,7 +129,7 @@ pub(crate) fn dispatch(
     }
 
     let stamp = Stamp {
-        call: call.call,
+        call: call.number,
         call_start: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("the clock is after 1970")
@@ -137,34 +137,34 @@ pub(crate) fn dispatch(
     };
     let mut arriving = futures::stream::select_all(payloads.into_iter().enumerate().map(
         |(partition, payload)| {
-            frames(transport.clone(), call.dispatcher_function.clone(), payload)
+            frames(invoker.clone(), call.dispatcher_function.clone(), payload)
                 .map(move |frame| (partition, frame))
         },
     ));
 
     Ok(Box::pin(try_stream! {
-        let mut results: Vec<Option<Response>> = vec![None; count];
+        let mut summaries: Vec<Option<DispatcherStats>> = vec![None; count];
         while let Some((partition, frame)) = arriving.next().await {
             match frame? {
                 Frame::Completed(completed) => {
                     // Retries are already spent, so the call cannot succeed
-                    // and this frame's answers are moot.
+                    // and this frame's outputs are moot.
                     if let Some(error) = completed.first_error {
                         Err(Error::InvocationFailed(error))?;
                     }
                     // Partition k holds inputs[k::count].
                     let place = |index: usize| partition + index * count;
                     let batch = Batch {
-                        done: completed.done,
-                        answers: completed
+                        succeeded: completed.succeeded,
+                        outputs: completed
                             .outputs
                             .into_iter()
-                            .map(|output| (place(output.index), output.response))
+                            .map(|output| (place(output.index), output.value))
                             .collect(),
                         invocation_stats: completed
-                            .stats
+                            .invocation_stats
                             .into_iter()
-                            .map(|stat| stamp.on(Stat { index: place(stat.index), ..stat }))
+                            .map(|stat| stamp.on(InvocationStats { index: place(stat.index), ..stat }))
                             .collect(),
                         dispatcher_stats: Vec::new(),
                     };
@@ -172,20 +172,20 @@ pub(crate) fn dispatch(
                         yield batch;
                     }
                 }
-                Frame::Result(response) => results[partition] = Some(*response),
+                Frame::Summary(stats) => summaries[partition] = Some(*stats),
             }
         }
 
-        let responses: Vec<Response> = results
+        let finished: Vec<DispatcherStats> = summaries
             .into_iter()
-            .map(|result| result.expect("a partition's stream ends with its result or an error"))
+            .map(|summary| summary.expect("a partition's stream ends with its summary or an error"))
             .collect();
         yield Batch {
-            dispatcher_stats: responses.iter().cloned().map(|r| stamp.on(r)).collect(),
+            dispatcher_stats: finished.iter().cloned().map(|r| stamp.on(r)).collect(),
             ..Batch::default()
         };
-        for (partition, response) in responses.iter().enumerate() {
-            check(response, expected[partition])?;
+        for (partition, stats) in finished.iter().enumerate() {
+            check(stats, expected[partition])?;
         }
     }))
 }
@@ -206,24 +206,24 @@ impl Stamp {
     }
 }
 
-/// One dispatcher's frames as they arrive, ending in its result.
+/// One dispatcher's frames as they arrive, ending in its summary.
 fn frames(
-    transport: Arc<dyn Transport>,
-    function: String,
+    invoker: Arc<dyn Invoker>,
+    function_name: String,
     payload: Vec<u8>,
 ) -> BoxStream<'static, Result<Frame, Error>> {
     Box::pin(try_stream! {
-        let mut chunks = transport.stream(&function, payload).await?;
+        let mut chunks = invoker.invoke_streaming(&function_name, payload).await?;
         let mut framer = Framer::default();
         let mut finished = false;
         while let Some(chunk) = chunks.next().await {
             for frame in framer.push(&chunk?)? {
-                finished |= matches!(frame, Frame::Result(_));
+                finished |= matches!(frame, Frame::Summary(_));
                 yield frame;
             }
         }
         if !finished {
-            Err(Error::NoResult)?;
+            Err(Error::NoSummary)?;
         }
     })
 }
@@ -233,19 +233,19 @@ fn frames(
 /// A short partition is silent - skipped work just never happens - so
 /// the count is checked as well as the errors, against `expected`, the
 /// number of inputs this side sent.
-fn check(response: &Response, expected: usize) -> Result<(), Error> {
-    if response.function_errors + response.transport_errors > 0 {
+fn check(stats: &DispatcherStats, expected: usize) -> Result<(), Error> {
+    if stats.function_errors + stats.transport_errors > 0 {
         return Err(Error::InvocationsFailed {
-            req_id: response.req_id.clone(),
-            function_errors: response.function_errors,
-            transport_errors: response.transport_errors,
-            first_error: response.first_error.clone(),
+            req_id: stats.req_id.clone(),
+            function_errors: stats.function_errors,
+            transport_errors: stats.transport_errors,
+            first_error: stats.first_error.clone(),
         });
     }
-    if response.succeeded != expected {
+    if stats.succeeded != expected {
         return Err(Error::PartitionShort {
-            req_id: response.req_id.clone(),
-            succeeded: response.succeeded,
+            req_id: stats.req_id.clone(),
+            succeeded: stats.succeeded,
             expected,
         });
     }
@@ -255,11 +255,11 @@ fn check(response: &Response, expected: usize) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use map_lambda_protocol::Response;
+    use map_lambda_protocol::DispatcherStats;
 
-    fn response(succeeded: usize) -> Response {
-        Response {
-            req_id: "coord-0".to_string(),
+    fn stats(succeeded: usize) -> DispatcherStats {
+        DispatcherStats {
+            req_id: "dispatcher-0".to_string(),
             dispatched: succeeded,
             succeeded,
             function_errors: 0,
@@ -273,21 +273,21 @@ mod tests {
         }
     }
 
-    fn refusal(response: Response, expected: usize) -> String {
-        check(&response, expected).expect_err("refused").to_string()
+    fn refusal(stats: DispatcherStats, expected: usize) -> String {
+        check(&stats, expected).expect_err("refused").to_string()
     }
 
     #[test]
     fn a_clean_full_partition_passes() {
-        check(&response(42), 42).expect("clean");
+        check(&stats(42), 42).expect("clean");
     }
 
     #[test]
     fn a_reported_failure_is_refused() {
-        let failed = Response {
+        let failed = DispatcherStats {
             function_errors: 1,
             first_error: Some("boom".into()),
-            ..response(41)
+            ..stats(41)
         };
         assert!(refusal(failed, 42).contains("1 function"));
     }
@@ -295,9 +295,9 @@ mod tests {
     /// The dangerous case: work silently skipped.
     #[test]
     fn a_short_partition_with_no_error_is_refused() {
-        let short = Response {
+        let short = DispatcherStats {
             dispatched: 42,
-            ..response(41)
+            ..stats(41)
         };
         assert!(refusal(short, 42).contains("completed 41 of 42"));
     }

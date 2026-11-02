@@ -1,19 +1,19 @@
 //! Folding a partition's finished invocations into the counts it is judged
 //! on.
 
-use crate::invoke::{Attempted, Outcome};
-use crate::protocol::{Completed, Output, Response, Stat};
+use crate::invoke::{Invocation, Outcome};
+use crate::protocol::{Completed, DispatcherStats, InvocationStats, Output};
 
 /// A tally of counts for the partition run so far.
 #[derive(Default)]
 pub(crate) struct Tally {
     /// What the client asked to be sent back.
     returning: Return,
-    /// Answers and records that have not gone out in a frame yet.
+    /// Outputs and records that have not gone out in a frame yet.
     outputs: Vec<Output>,
-    stats: Vec<Stat>,
+    invocation_stats: Vec<InvocationStats>,
     /// What the frames so far have accounted for.
-    sent_done: usize,
+    sent_succeeded: usize,
     succeeded: usize,
     function_errors: usize,
     transport_errors: usize,
@@ -51,37 +51,37 @@ impl Tally {
     /// Everything that has finished since the last call.
     pub(crate) fn take_completed(&mut self) -> Completed {
         let completed = Completed {
-            done: self.succeeded - self.sent_done,
+            succeeded: self.succeeded - self.sent_succeeded,
             outputs: std::mem::take(&mut self.outputs),
-            stats: std::mem::take(&mut self.stats),
+            invocation_stats: std::mem::take(&mut self.invocation_stats),
             first_error: std::mem::take(&mut self.frame_error),
         };
-        self.sent_done = self.succeeded;
+        self.sent_succeeded = self.succeeded;
         completed
     }
 
     /// Fold in one finished invocation.
     ///
     /// `index` is where its input sat in the partition.
-    pub(crate) fn observe(&mut self, index: usize, attempted: Attempted) {
-        let Attempted {
+    pub(crate) fn observe(&mut self, index: usize, invocation: Invocation) {
+        let Invocation {
             outcome,
             retried,
             invoke_start,
             invoke_end,
             waited_ms,
-        } = attempted;
+        } = invocation;
         self.retried += retried;
         self.retry_wait_ms += waited_ms;
         match outcome {
-            Outcome::Ok { req_id, answer } => {
+            Outcome::Ok { req_id, output } => {
                 self.succeeded += 1;
-                // A null answer gets no entry on the wire.
-                if let (true, Some(response)) = (self.returning.outputs, answer) {
-                    self.outputs.push(Output { index, response });
+                // A null output gets no entry on the wire.
+                if let (true, Some(value)) = (self.returning.outputs, output) {
+                    self.outputs.push(Output { index, value });
                 }
                 if self.returning.stats {
-                    self.stats.push(Stat {
+                    self.invocation_stats.push(InvocationStats {
                         index,
                         req_id,
                         invoke_start,
@@ -102,17 +102,17 @@ impl Tally {
         }
     }
 
-    /// The finished partition, as the result frame reports it.
+    /// The finished partition, as the summary frame reports it.
     ///
-    pub(crate) fn into_response(
+    pub(crate) fn into_stats(
         self,
         req_id: String,
         dispatched: usize,
         cold: Option<bool>,
         connections: usize,
         elapsed_ms: f64,
-    ) -> Response {
-        Response {
+    ) -> DispatcherStats {
+        DispatcherStats {
             req_id,
             dispatched,
             succeeded: self.succeeded,
@@ -130,23 +130,23 @@ impl Tally {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attempted, Outcome, Return, Tally};
+    use super::{Invocation, Outcome, Return, Tally};
     use serde_json::json;
 
     fn ok(req_id: &str) -> Outcome {
         Outcome::Ok {
             req_id: req_id.to_string(),
-            answer: Some(serde_json::value::to_raw_value(&json!({"copied": 1})).expect("json")),
+            output: Some(serde_json::value::to_raw_value(&json!({"copied": 1})).expect("json")),
         }
     }
 
-    fn attempted(
+    fn invocation(
         outcome: Outcome,
         retried: usize,
         invoke_start: f64,
         invoke_end: f64,
-    ) -> Attempted {
-        Attempted {
+    ) -> Invocation {
+        Invocation {
             outcome,
             retried,
             invoke_start,
@@ -155,10 +155,10 @@ mod tests {
         }
     }
 
-    fn waiting(outcome: Outcome, waited_ms: f64) -> Attempted {
-        Attempted {
+    fn waiting(outcome: Outcome, waited_ms: f64) -> Invocation {
+        Invocation {
             waited_ms,
-            ..attempted(outcome, 1, 1.0, 2.0)
+            ..invocation(outcome, 1, 1.0, 2.0)
         }
     }
 
@@ -171,7 +171,7 @@ mod tests {
     }
 
     fn observe(tally: &mut Tally, outcome: Outcome, attempts: usize) {
-        tally.observe(0, attempted(outcome, attempts, 1.0, 2.0));
+        tally.observe(0, invocation(outcome, attempts, 1.0, 2.0));
     }
 
     #[test]
@@ -235,17 +235,17 @@ mod tests {
         observe(&mut tally, Outcome::Function("no".into()), 0);
         let second = tally.take_completed();
 
-        assert_eq!((first.done, second.done), (1, 1));
-        let response = tally.into_response("c-0".to_string(), 3, None, 1, 1.0);
-        assert_eq!(first.done + second.done, response.succeeded);
+        assert_eq!((first.succeeded, second.succeeded), (1, 1));
+        let stats = tally.into_stats("c-0".to_string(), 3, None, 1, 1.0);
+        assert_eq!(first.succeeded + second.succeeded, stats.succeeded);
         // A frame reports a failure as the message the client raises on;
         // the count of them is the result's.
         assert_eq!(second.first_error.as_deref(), Some("no"));
-        assert_eq!(response.function_errors + response.transport_errors, 1);
+        assert_eq!(stats.function_errors + stats.transport_errors, 1);
     }
 
     /// The client raises on the frame rather than waiting for the
-    /// result, so the frame has to say what went wrong.
+    /// summary, so the frame has to say what went wrong.
     #[test]
     fn a_frame_carries_the_first_failure_it_counts() {
         let mut tally = returning_everything();
@@ -260,8 +260,8 @@ mod tests {
         // Taken with the frame, so a later one does not repeat it - while
         // the result still reports the run's first.
         assert_eq!(tally.take_completed().first_error, None);
-        let response = tally.into_response("c-0".to_string(), 3, None, 1, 1.0);
-        assert_eq!(response.first_error.as_deref(), Some("first no"));
+        let stats = tally.into_stats("c-0".to_string(), 3, None, 1, 1.0);
+        assert_eq!(stats.first_error.as_deref(), Some("first no"));
     }
 
     /// A tick with nothing new on it is not sent, so the only frame a
@@ -281,10 +281,10 @@ mod tests {
             stats: false,
             outputs: true,
         });
-        tally.observe(0, attempted(ok("a"), 1, 1.0, 2.0));
+        tally.observe(0, invocation(ok("a"), 1, 1.0, 2.0));
         let completed = tally.take_completed();
-        assert!(completed.stats.is_empty());
-        assert_eq!(completed.done, 1);
+        assert!(completed.invocation_stats.is_empty());
+        assert_eq!(completed.succeeded, 1);
         assert_eq!(tally.retried, 1);
     }
 
@@ -296,18 +296,18 @@ mod tests {
             stats: true,
             outputs: false,
         });
-        tally.observe(0, attempted(ok("a"), 0, 1.0, 2.0));
+        tally.observe(0, invocation(ok("a"), 0, 1.0, 2.0));
         let completed = tally.take_completed();
         assert!(completed.outputs.is_empty());
-        assert_eq!(completed.done, 1);
-        assert_eq!(completed.stats.len(), 1);
+        assert_eq!(completed.succeeded, 1);
+        assert_eq!(completed.invocation_stats.len(), 1);
     }
 
     #[test]
     fn a_kept_stat_carries_the_workers_request_id_and_its_timing() {
         let mut tally = returning_everything();
-        tally.observe(4, attempted(ok("w-9"), 0, 10.5, 12.5));
-        let stats = tally.take_completed().stats;
+        tally.observe(4, invocation(ok("w-9"), 0, 10.5, 12.5));
+        let stats = tally.take_completed().invocation_stats;
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].index, 4);
         assert_eq!(stats[0].req_id, "w-9");
@@ -317,15 +317,15 @@ mod tests {
 
     /// Where a field added to one and forgotten in the other shows up.
     #[test]
-    fn the_response_carries_the_whole_tally() {
+    fn the_stats_carry_the_whole_tally() {
         let mut tally = returning_everything();
         observe(&mut tally, ok("w-1"), 1);
         observe(&mut tally, Outcome::Function("bad input".into()), 0);
         observe(&mut tally, Outcome::Transport("goaway".into()), 2);
 
-        let response = tally.into_response("coord-0".to_string(), 3, Some(true), 4, 12.5);
-        let record = serde_json::to_value(&response).expect("serializable");
-        assert_eq!(record["req_id"], "coord-0");
+        let stats = tally.into_stats("dispatcher-0".to_string(), 3, Some(true), 4, 12.5);
+        let record = serde_json::to_value(&stats).expect("serializable");
+        assert_eq!(record["req_id"], "dispatcher-0");
         assert_eq!(record["dispatched"], 3);
         assert_eq!(record["succeeded"], 1);
         assert_eq!(record["function_errors"], 1);
@@ -338,6 +338,6 @@ mod tests {
         assert_eq!(record["elapsed_ms"], 12.5);
         // Records ride on the frames; repeating them here would be a
         // second copy of the whole partition.
-        assert!(record.get("stats").is_none(), "{record}");
+        assert!(record.get("invocation_stats").is_none(), "{record}");
     }
 }

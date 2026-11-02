@@ -5,7 +5,7 @@ from typing import Any, Literal, Self
 
 from . import _native
 
-# Worker invocations in flight per run, split across its dispatchers.
+# Worker invocations in flight per call, split across its dispatchers.
 DEFAULT_CONCURRENCY: int = _native.DEFAULT_CONCURRENCY
 
 # A local `cargo lambda watch` server, started from rust/.
@@ -15,11 +15,11 @@ DEFAULT_DISPATCHER_FUNCTION: str = _native.DEFAULT_DISPATCHER_FUNCTION
 
 __docformat__ = "google"
 
-__all__ = ["Lambdas", "for_each", "map_unordered"]
+__all__ = ["Session", "for_each", "map_unordered"]
 
 
 @dataclass
-class Lambdas:
+class Session:
     """
     The deployed lambdas, holding settings and stats for a session.
     Use as `async with`.
@@ -42,7 +42,7 @@ class Lambdas:
 
     concurrency: int = DEFAULT_CONCURRENCY
     """
-    The total number of worker lambdas in flight for the whole run, split
+    The total number of worker lambdas in flight for the whole call, split
     across dispatchers.
     """
 
@@ -50,7 +50,7 @@ class Lambdas:
     """
     How many times to retry on a transport failure (per invocation). The
     default is 2, which is 3 attempts in total. A worker that ran and raised
-    is never retried: the same payload gets the same answer.
+    is never retried: the same payload gets the same output.
     """
 
     on_progress: Callable[[int], None] | None = None
@@ -67,7 +67,7 @@ class Lambdas:
     * `req_id` - AWS's id for the dispatcher's own invocation, for finding
       its run in CloudWatch
     * `dispatched` - invocations it sent, which is its partition's size
-    * `succeeded` - invocations that answered
+    * `succeeded` - invocations that returned
     * `function_errors` - the worker ran and failed
     * `transport_errors` - the request never got a usable response
     * `retried` - attempts beyond the first, across the partition
@@ -77,8 +77,8 @@ class Lambdas:
       local run, which has no shared client set to build
     * `connections` - HTTP/2 connections the invocations were spread over
     * `elapsed_ms` - how long the partition took
-    * `call` - which [`map_unordered`][map_lambda.Lambdas.map_unordered] or
-      [`for_each`][map_lambda.Lambdas.for_each] of the session this was
+    * `call` - which [`map_unordered`][map_lambda.Session.map_unordered] or
+      [`for_each`][map_lambda.Session.for_each] of the session this was
     * `call_start` - when that call began, as epoch seconds
     """
 
@@ -91,26 +91,26 @@ class Lambdas:
     * `req_id` - AWS's id for the worker invocation, for joining to CloudWatch.
       Empty against `cargo lambda watch`, which assigns none
     * `invoke_start`, `invoke_end` - epoch seconds, spanning every attempt
-    * `call`, `call_start` - as in [`dispatcher_stats`][map_lambda.Lambdas.dispatcher_stats]
+    * `call`, `call_start` - as in [`dispatcher_stats`][map_lambda.Session.dispatcher_stats]
     """
 
-    _client: Any = field(default=None, init=False, repr=False)
-    _session: Any = field(default=None, init=False, repr=False)
+    _invoker: Any = field(default=None, init=False, repr=False)
+    _native_session: Any = field(default=None, init=False, repr=False)
 
     async def __aenter__(self) -> Self:
-        self._client = await _native.connect(self.endpoint_url)
+        self._invoker = await _native.connect(self.endpoint_url)
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
-        self._client = None
-        self._session = None
+        self._invoker = None
+        self._native_session = None
 
-    def _require_session(self) -> Any:
-        if self._client is None:
-            raise RuntimeError("Lambdas has no client: use `async with Lambdas(...) as lambdas:`")
-        if self._session is None:
-            self._session = _native.Session(self._client, self.endpoint_url)
-        return self._session
+    def _require_native_session(self) -> Any:
+        if self._invoker is None:
+            raise RuntimeError("Session is not open: use `async with Session(...) as session:`")
+        if self._native_session is None:
+            self._native_session = _native.Session(self._invoker, self.endpoint_url)
+        return self._native_session
 
     def map_unordered(
         self,
@@ -123,8 +123,8 @@ class Lambdas:
     ) -> AsyncGenerator[tuple[int, Any], None]:
         """
         Invoke `function_name` once per value of `inputs`, yielding
-        `(index, return value)` as each answer comes back. If return
-        values are not needed, use [`for_each`][map_lambda.Lambdas.for_each].
+        `(index, output)` as each output comes back. If outputs
+        are not needed, use [`for_each`][map_lambda.Session.for_each].
 
         Each worker's payload is a dict with the input value
         under `input_key`, plus a copy of `constant_args` (if supplied).
@@ -138,10 +138,10 @@ class Lambdas:
             constant_args: Optional extra arguments to pass to each function invocation.
 
         Yields:
-            `(index, return value)`, in the order the invocations finished.
+            `(index, output)`, in the order the invocations finished.
         """
         return self._stream(
-            self._require_session(),
+            self._require_native_session(),
             function_name,
             inputs,
             input_key=input_key,
@@ -151,7 +151,7 @@ class Lambdas:
 
     async def _stream(
         self,
-        session: Any,
+        native_session: Any,
         function_name: str,
         inputs: list[Any],
         /,
@@ -161,10 +161,10 @@ class Lambdas:
         return_outputs: bool,
     ) -> AsyncGenerator[tuple[int, Any], None]:
         """
-        Labelled answers as they arrive, or none at all when
+        Labelled outputs as they arrive, or none at all when
         `return_outputs` is false.
         """
-        run = session.dispatch(
+        batches = native_session.start(
             function_name,
             inputs,
             input_key=input_key,
@@ -177,19 +177,19 @@ class Lambdas:
             return_stats=self.invocation_stats is not None,
         )
         # Closed explicitly so that stopping early tears the dispatchers
-        # down now, rather than whenever `run` is collected.
+        # down now, rather than whenever `batches` is collected.
         try:
-            async for batch in run:
+            async for batch in batches:
                 if self.invocation_stats is not None:
                     self.invocation_stats.extend(batch.invocation_stats)
                 if self.dispatcher_stats is not None:
                     self.dispatcher_stats.extend(batch.dispatcher_stats)
-                if self.on_progress is not None and batch.done:
-                    self.on_progress(batch.done)
-                for answer in batch.answers:
-                    yield answer
+                if self.on_progress is not None and batch.succeeded:
+                    self.on_progress(batch.succeeded)
+                for output in batch.outputs:
+                    yield output
         finally:
-            run.close()
+            batches.close()
 
     async def for_each(
         self,
@@ -202,35 +202,35 @@ class Lambdas:
     ) -> None:
         """
         Invoke `function_name` once for each value of `inputs`. This is
-        the same as [`map_unordered`][map_lambda.Lambdas.map_unordered] except nothing is
+        the same as [`map_unordered`][map_lambda.Session.map_unordered] except nothing is
         returned, and it
-        waits for the whole run.
+        waits for the whole call.
 
-        Refer to [`map_unordered`][map_lambda.Lambdas.map_unordered] for argument definitions.
+        Refer to [`map_unordered`][map_lambda.Session.map_unordered] for argument definitions.
         """
         stream = self._stream(
-            self._require_session(),
+            self._require_native_session(),
             function_name,
             inputs,
             input_key=input_key,
             constant_args=constant_args,
             return_outputs=False,
         )
-        # Nothing to iterate - the answers were never asked for - but
+        # Nothing to iterate - the outputs were never asked for - but
         # draining it is what settles the partitions and raises.
         async for _ in stream:
             pass
 
-    async def invoke(self, function_name: str, /, **payload: Any) -> None:
+    async def invoke_detached(self, function_name: str, /, **payload: Any) -> None:
         """
         Invoke `function_name` once with the given payload and do not wait for it.
 
         Useful for "fire and forget" semantics, where failing after submission
         and not learning about the failure is acceptable - failing to submit
         raises. For a synchronous one-off, use
-        [`for_each`][map_lambda.Lambdas.for_each] with a single input.
+        [`for_each`][map_lambda.Session.for_each] with a single input.
         """
-        await self._require_session().invoke(function_name, json.dumps(payload))
+        await self._require_native_session().invoke_detached(function_name, json.dumps(payload))
 
 
 async def map_unordered(
@@ -250,21 +250,21 @@ async def map_unordered(
 ) -> AsyncGenerator[tuple[int, Any], None]:
     """
     Invoke `function_name` once per value of `inputs`, yielding
-    `(index, return value)` as each answer comes back. If return values
+    `(index, output)` as each output comes back. If outputs
     are not needed, use [`for_each`][map_lambda.for_each].
 
-    Refer to [`Lambdas.map_unordered`][map_lambda.Lambdas.map_unordered] for argument
+    Refer to [`Session.map_unordered`][map_lambda.Session.map_unordered] for argument
     definitions.
 
     `endpoint_url` onwards are the dispatch settings documented on
-    [`Lambdas`][map_lambda.Lambdas], applied to a session opened for this call alone - which
+    [`Session`][map_lambda.Session], applied to a session opened for this call alone - which
     closes when the iterator does, so stopping early still shuts the
     client down.
 
     Yields:
-        `(index, return value)`, in the order the invocations finished.
+        `(index, output)`, in the order the invocations finished.
     """
-    async with Lambdas(
+    async with Session(
         endpoint_url=endpoint_url,
         dispatchers=dispatchers,
         concurrency=concurrency,
@@ -272,14 +272,14 @@ async def map_unordered(
         on_progress=on_progress,
         dispatcher_stats=dispatcher_stats,
         invocation_stats=invocation_stats,
-    ) as lambdas:
-        async for answer in lambdas.map_unordered(
+    ) as session:
+        async for output in session.map_unordered(
             function_name,
             inputs,
             input_key=input_key,
             constant_args=constant_args,
         ):
-            yield answer
+            yield output
 
 
 async def for_each(
@@ -301,10 +301,10 @@ async def for_each(
     Invoke `function_name` once for each value of `inputs`. This is
     the same as [`map_unordered`][map_lambda.map_unordered] except nothing is returned.
 
-    Refer to [`Lambdas.map_unordered`][map_lambda.Lambdas.map_unordered] for argument
+    Refer to [`Session.map_unordered`][map_lambda.Session.map_unordered] for argument
     definitions.
     """
-    async with Lambdas(
+    async with Session(
         endpoint_url=endpoint_url,
         dispatchers=dispatchers,
         concurrency=concurrency,
@@ -312,8 +312,8 @@ async def for_each(
         on_progress=on_progress,
         dispatcher_stats=dispatcher_stats,
         invocation_stats=invocation_stats,
-    ) as lambdas:
-        await lambdas.for_each(
+    ) as session:
+        await session.for_each(
             function_name,
             inputs,
             input_key=input_key,

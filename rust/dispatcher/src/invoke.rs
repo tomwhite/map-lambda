@@ -4,7 +4,7 @@
 use aws_sdk_lambda::error::ProvideErrorMetadata;
 use aws_sdk_lambda::operation::RequestId;
 use aws_sdk_lambda::primitives::Blob;
-use aws_sdk_lambda::Client;
+use aws_sdk_lambda::Client as LambdaClient;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,8 +15,8 @@ pub(crate) enum Outcome {
     Ok {
         req_id: String,
         /// The worker's whole response body, unparsed. `None` for a
-        /// worker that answered null.
-        answer: Option<Box<RawValue>>,
+        /// worker that returned null.
+        output: Option<Box<RawValue>>,
     },
     /// Lambda ran the worker and the worker failed.
     Function(String),
@@ -41,14 +41,14 @@ const PERMANENT_ERROR_CODES: [&str; 6] = [
 /// success, whatever the body says.
 ///
 /// A body that is not JSON comes through as `None`, the same as
-/// answering null, rather than failing the invocation. `req_id` is the
+/// returning null, rather than failing the invocation. `req_id` is the
 /// response's `x-amzn-requestid`, as in `read_error_channel`.
 pub(crate) fn read_body(req_id: &str, body: Option<&[u8]>) -> Outcome {
     Outcome::Ok {
         req_id: req_id.to_string(),
-        answer: body
+        output: body
             .and_then(|bytes| serde_json::from_slice::<Box<RawValue>>(bytes).ok())
-            .filter(|answer| answer.get() != "null"),
+            .filter(|output| output.get() != "null"),
     }
 }
 
@@ -74,10 +74,14 @@ pub(crate) fn read_error_channel(
     })
 }
 
-/// The worker payload for one invocation: the template with this
-/// group added under `input_key`.
-pub(crate) fn payload_for(template: &Map<String, Value>, input_key: &str, input: Value) -> Vec<u8> {
-    let mut body = template.clone();
+/// The worker payload for one invocation: `constant_args` with this
+/// input added under `input_key`.
+pub(crate) fn payload_for(
+    constant_args: &Map<String, Value>,
+    input_key: &str,
+    input: Value,
+) -> Vec<u8> {
+    let mut body = constant_args.clone();
     body.insert(input_key.to_string(), input);
     Value::Object(body).to_string().into_bytes()
 }
@@ -121,7 +125,7 @@ fn backoff_ms(attempts_beyond_first: usize) -> u64 {
 }
 
 /// What one invocation came to.
-pub(crate) struct Attempted {
+pub(crate) struct Invocation {
     pub(crate) outcome: Outcome,
     /// Attempts beyond the first.
     pub(crate) retried: usize,
@@ -134,42 +138,42 @@ pub(crate) struct Attempted {
 /// One invocation, with `retries` further attempts after a *transport*
 /// failure, which excludes a rejection.
 pub(crate) async fn invoke_with_retries(
-    client: &Client,
-    function_name: &str,
+    client: &LambdaClient,
+    worker_function: &str,
     payload: Vec<u8>,
     retries: usize,
-) -> Attempted {
+) -> Invocation {
     let start = now();
     let mut attempts_beyond_first = 0;
     let mut waited_ms = 0.0;
     loop {
         let outcome = match client
             .invoke()
-            .function_name(function_name)
+            .function_name(worker_function)
             .payload(Blob::new(payload.clone()))
             .send()
             .await
         {
             // A function error is an HTTP 200, not an `Err`.
-            Ok(output) if output.function_error().is_some() => read_error_channel(
-                output.function_error().unwrap_or_default(),
-                output.request_id().unwrap_or_default(),
-                output.payload().map(|blob| blob.as_ref()),
+            Ok(invoked) if invoked.function_error().is_some() => read_error_channel(
+                invoked.function_error().unwrap_or_default(),
+                invoked.request_id().unwrap_or_default(),
+                invoked.payload().map(|blob| blob.as_ref()),
             ),
-            Ok(output) => read_body(
-                output.request_id().unwrap_or_default(),
-                output.payload().map(|blob| blob.as_ref()),
+            Ok(invoked) => read_body(
+                invoked.request_id().unwrap_or_default(),
+                invoked.payload().map(|blob| blob.as_ref()),
             ),
             Err(e) => match e.code() {
                 Some(code) if PERMANENT_ERROR_CODES.contains(&code) => Outcome::Rejected(format!(
-                    "{code} invoking {function_name}: {}",
+                    "{code} invoking {worker_function}: {}",
                     e.message().unwrap_or("no message")
                 )),
                 _ => Outcome::Transport(error_chain(&e)),
             },
         };
         if !matches!(outcome, Outcome::Transport(_)) || attempts_beyond_first >= retries {
-            return Attempted {
+            return Invocation {
                 outcome,
                 retried: attempts_beyond_first,
                 invoke_start: start,
@@ -188,7 +192,7 @@ pub(crate) async fn invoke_with_retries(
 mod tests {
     use super::{
         backoff_ms, error_chain, invoke_with_retries, payload_for, read_body, read_error_channel,
-        Client, Outcome, RETRY_BASE_MS, RETRY_CAP_MS,
+        LambdaClient, Outcome, RETRY_BASE_MS, RETRY_CAP_MS,
     };
     use aws_config::retry::RetryConfig;
     use aws_credential_types::Credentials;
@@ -198,7 +202,7 @@ mod tests {
 
     // ---- the retry loop ----
     //
-    // A replay client that runs out of events answers `ConnectorError`, a
+    // A replay client that runs out of events fails with `ConnectorError`, a
     // transport error, so "it stopped after exactly N attempts" is
     // assertable by counting the requests actually made.
 
@@ -226,7 +230,7 @@ mod tests {
             .expect("a valid response")
     }
 
-    /// The request never got a usable answer - the transport-error case
+    /// The request never got a usable output - the transport-error case
     /// a GOAWAY lands in.
     fn transport_failed() -> http::Response<SdkBody> {
         http::Response::builder()
@@ -251,19 +255,19 @@ mod tests {
             .expect("a valid request")
     }
 
-    /// A Lambda client that answers with `responses`, in order.
+    /// A Lambda client that responds with `responses`, in order.
     ///
-    /// `RetryConfig::disabled()` as in `clients()`: without it the SDK
+    /// `RetryConfig::disabled()` as in `shared()`: without it the SDK
     /// re-sends a 500 itself, eats the next scripted response and
     /// reports one attempt where three happened.
-    fn replaying(responses: Vec<http::Response<SdkBody>>) -> (Client, StaticReplayClient) {
+    fn replaying(responses: Vec<http::Response<SdkBody>>) -> (LambdaClient, StaticReplayClient) {
         let http_client = StaticReplayClient::new(
             responses
                 .into_iter()
                 .map(|r| ReplayEvent::new(a_request(), r))
                 .collect(),
         );
-        let client = Client::from_conf(
+        let client = LambdaClient::from_conf(
             aws_sdk_lambda::config::Builder::new()
                 .http_client(http_client.clone())
                 .credentials_provider(Credentials::for_tests())
@@ -284,10 +288,10 @@ mod tests {
         retries: usize,
     ) -> (Outcome, usize, usize) {
         let (client, http_client) = replaying(responses);
-        let attempted = invoke_with_retries(&client, "echo", b"{}".to_vec(), retries).await;
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), retries).await;
         (
-            attempted.outcome,
-            attempted.retried,
+            invocation.outcome,
+            invocation.retried,
             attempts_made(&http_client),
         )
     }
@@ -325,12 +329,12 @@ mod tests {
             worker_ok("w-1"),
         ]);
         let before = tokio::time::Instant::now();
-        let attempted = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
 
-        assert!(matches!(attempted.outcome, Outcome::Ok { .. }));
+        assert!(matches!(invocation.outcome, Outcome::Ok { .. }));
         assert_eq!(attempts_made(&http_client), 3);
         // every millisecond that passed was one this chose to wait
-        assert_eq!(before.elapsed().as_millis() as f64, attempted.waited_ms);
+        assert_eq!(before.elapsed().as_millis() as f64, invocation.waited_ms);
     }
 
     /// A worker that raised will raise again on the same payload, so the
@@ -343,11 +347,11 @@ mod tests {
             worker_ok("never reached"),
         ]);
         let before = tokio::time::Instant::now();
-        let attempted = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
 
-        assert!(matches!(attempted.outcome, Outcome::Function(_)));
-        assert_eq!(attempted.retried, 0);
-        assert_eq!(attempted.waited_ms, 0.0);
+        assert!(matches!(invocation.outcome, Outcome::Function(_)));
+        assert_eq!(invocation.retried, 0);
+        assert_eq!(invocation.waited_ms, 0.0);
         assert_eq!(before.elapsed().as_millis(), 0);
     }
 
@@ -383,7 +387,7 @@ mod tests {
 
     /// More failures are queued than the budget allows, so "it stopped"
     /// is the count of requests actually made rather than the absence of
-    /// a further answer.
+    /// a further output.
     #[tokio::test]
     async fn an_invocation_that_never_succeeds_stops_after_exactly_retries() {
         let (outcome, retried, attempts) = invoke(
@@ -423,16 +427,16 @@ mod tests {
             worker_ok("never reached"),
         ]);
         let before = tokio::time::Instant::now();
-        let attempted = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
 
-        match attempted.outcome {
+        match invocation.outcome {
             Outcome::Rejected(message) => assert_eq!(
                 message,
                 "AccessDeniedException invoking echo: role is not authorized"
             ),
             other => panic!("expected a rejection, got {other:?}"),
         }
-        assert_eq!(attempted.retried, 0);
+        assert_eq!(invocation.retried, 0);
         assert_eq!(attempts_made(&http_client), 1);
         assert_eq!(before.elapsed().as_millis(), 0);
     }
@@ -590,15 +594,15 @@ mod tests {
             worker_ok("w-6"),
         ]);
         let before = super::now();
-        let attempted = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
         assert!(
-            attempted.invoke_start >= before,
+            invocation.invoke_start >= before,
             "start is stamped before the first attempt"
         );
-        assert!(attempted.invoke_end >= attempted.invoke_start);
+        assert!(invocation.invoke_end >= invocation.invoke_start);
     }
 
-    fn a_template() -> Map<String, Value> {
+    fn some_constant_args() -> Map<String, Value> {
         json!({
             "store": "s3://bucket/data",
             "tile_shape": [64, 721, 1440],
@@ -610,33 +614,37 @@ mod tests {
 
     #[test]
     fn the_template_is_passed_through_with_the_input_added() {
-        let body: Value =
-            serde_json::from_slice(&payload_for(&a_template(), "coord", json!([3, 0, 1])))
-                .expect("valid json");
+        let body: Value = serde_json::from_slice(&payload_for(
+            &some_constant_args(),
+            "input",
+            json!([3, 0, 1]),
+        ))
+        .expect("valid json");
 
         assert_eq!(body["store"], "s3://bucket/data");
         assert_eq!(body["tile_shape"], json!([64, 721, 1440]));
         // verbatim: a coordinate, not a list of one
-        assert_eq!(body["coord"], json!([3, 0, 1]));
+        assert_eq!(body["input"], json!([3, 0, 1]));
     }
 
     #[test]
     fn the_key_and_the_inputs_shape_are_the_requests_to_choose() {
         let body: Value = serde_json::from_slice(&payload_for(
-            &a_template(),
+            &some_constant_args(),
             "coords",
             json!([[0, 0], [0, 1], [1, 0]]),
         ))
         .expect("valid json");
 
         assert_eq!(body["coords"], json!([[0, 0], [0, 1], [1, 0]]));
-        assert!(body.get("coord").is_none());
+        assert!(body.get("input").is_none());
     }
 
     #[test]
     fn a_scalar_input_arrives_as_a_scalar() {
         let body: Value =
-            serde_json::from_slice(&payload_for(&a_template(), "i", json!(7))).expect("valid json");
+            serde_json::from_slice(&payload_for(&some_constant_args(), "i", json!(7)))
+                .expect("valid json");
 
         assert_eq!(body["i"], json!(7));
     }
@@ -644,16 +652,16 @@ mod tests {
     #[test]
     fn a_success_takes_its_request_id_from_the_response() {
         match read_body("abc-123", Some(br#"{"written":1}"#)) {
-            Outcome::Ok { req_id, answer } => {
+            Outcome::Ok { req_id, output } => {
                 assert_eq!(req_id, "abc-123");
-                assert_eq!(answer.expect("an answer").get(), r#"{"written":1}"#);
+                assert_eq!(output.expect("an output").get(), r#"{"written":1}"#);
             }
             other => panic!("expected success, got {other:?}"),
         }
     }
 
     #[test]
-    fn a_worker_that_answers_with_nothing_useful_still_succeeded() {
+    fn a_worker_that_returns_nothing_useful_still_succeeded() {
         for body in [
             None,
             Some(&b"not json"[..]),
@@ -661,9 +669,9 @@ mod tests {
             Some(&b" null\n"[..]),
         ] {
             match read_body("abc-123", body) {
-                Outcome::Ok { req_id, answer } => {
+                Outcome::Ok { req_id, output } => {
                     assert_eq!(req_id, "abc-123");
-                    assert!(answer.is_none(), "{answer:?}");
+                    assert!(output.is_none(), "{output:?}");
                 }
                 other => panic!("expected success, got {other:?}"),
             }
