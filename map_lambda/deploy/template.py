@@ -1,5 +1,5 @@
 """
-The CloudFormation template for a spec: a dispatcher, the workers at each memory size,
+The CloudFormation template for a spec: the dispatchers, the workers at each memory size,
 their roles and their log groups, named as the client expects.
 """
 
@@ -58,8 +58,6 @@ def template(spec: Spec, buckets: list[str]) -> dict[str, Any]:
             resource = _add_function(resources, base, name, function, memory, role)
             worker_arns.append({"Fn::GetAtt": [resource, "Arn"]})
 
-    dispatcher = spec.dispatcher
-    ((dispatcher_name, _),) = dispatcher.deployed(spec.project)
     invoke = {
         "PolicyName": "invoke-workers",
         "PolicyDocument": {
@@ -70,9 +68,11 @@ def template(spec: Spec, buckets: list[str]) -> dict[str, Any]:
         },
     }
     resources["DispatcherRole"] = _role([invoke])
-    _add_function(
-        resources, "Dispatcher", dispatcher_name, dispatcher, dispatcher.memory, "DispatcherRole"
-    )
+    for dispatcher in spec.dispatchers:
+        ((name, memory),) = dispatcher.deployed(spec.project)
+        _add_function(
+            resources, logical_id(dispatcher.name), name, dispatcher, memory, "DispatcherRole"
+        )
 
     return {
         "AWSTemplateFormatVersion": "2010-09-09",

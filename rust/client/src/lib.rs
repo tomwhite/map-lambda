@@ -26,10 +26,12 @@
 #![warn(missing_docs)]
 
 // A call flows `session` -> `call` -> `plan`, then `invoker` -> `frames`
-// once per partition, and comes back from `call` as `Batches`:
+// once per partition, and comes back from `call` as `Batches`, or through
+// `combine` as `CombineBatches` for a combining call:
 //
 // - `session` - the settings calls run with, and the calls themselves.
 // - `call` - one call: planned, invoked, its frames merged and checked.
+// - `combine` - a combining call, made from the same frames as a map.
 // - `plan` - how a call is divided, decided before anything is invoked.
 // - `invoker` - how a request reaches a dispatcher, behind a trait.
 // - `frames` - a response body back into frames.
@@ -37,6 +39,7 @@
 // - `testing` - a stand-in for Lambda.
 
 mod call;
+mod combine;
 mod error;
 mod frames;
 mod invoker;
@@ -45,6 +48,9 @@ mod session;
 pub mod testing;
 
 pub use call::{Batch, Batches, DispatcherStats, InvocationStats, Record};
+pub use combine::{CombineBatch, CombineBatches, State};
 pub use error::Error;
 pub use invoker::{connect, Chunks, Invoker, LOCAL_ENDPOINT_URL};
 pub use session::{function_name, Session, Settings, Worker, DEFAULT_CONCURRENCY, DISPATCHER};
+
+pub use map_lambda_protocol::Combine;

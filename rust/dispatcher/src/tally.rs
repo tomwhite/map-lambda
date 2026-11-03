@@ -3,6 +3,7 @@
 
 use crate::invoke::{Invocation, Outcome};
 use crate::protocol::{Completed, InvocationStats, Output};
+use serde_json::value::RawValue;
 
 /// A tally of counts for the partition run so far.
 #[derive(Default)]
@@ -10,6 +11,8 @@ pub(crate) struct Tally {
     /// What the client asked to be sent back beyond the counts.
     return_stats: bool,
     return_outputs: bool,
+    /// Whether a worker that returned nothing gets an `Output` of `null`.
+    null_outputs: bool,
     /// What has finished and not gone out in a frame yet.
     succeeded: usize,
     outputs: Vec<Output>,
@@ -23,10 +26,11 @@ pub(crate) struct Tally {
 }
 
 impl Tally {
-    pub(crate) fn new(return_stats: bool, return_outputs: bool) -> Self {
+    pub(crate) fn new(return_stats: bool, return_outputs: bool, null_outputs: bool) -> Self {
         Self {
             return_stats,
             return_outputs,
+            null_outputs,
             ..Self::default()
         }
     }
@@ -38,6 +42,7 @@ impl Tally {
             outputs: std::mem::take(&mut self.outputs),
             invocation_stats: std::mem::take(&mut self.invocation_stats),
             first_error: std::mem::take(&mut self.first_error),
+            ..Completed::default()
         }
     }
 
@@ -57,9 +62,11 @@ impl Tally {
         match outcome {
             Outcome::Ok { req_id, output } => {
                 self.succeeded += 1;
-                // A null output gets no entry on the wire.
-                if let (true, Some(value)) = (self.return_outputs, output) {
-                    self.outputs.push(Output { index, value });
+                if self.return_outputs {
+                    let value = output.or_else(|| self.null_outputs.then(null));
+                    if let Some(value) = value {
+                        self.outputs.push(Output { index, value });
+                    }
                 }
                 if self.return_stats {
                     self.invocation_stats.push(InvocationStats {
@@ -89,6 +96,10 @@ impl Tally {
     }
 }
 
+fn null() -> Box<RawValue> {
+    RawValue::from_string("null".to_string()).expect("null is JSON")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Invocation, Outcome, Tally};
@@ -98,6 +109,13 @@ mod tests {
         Outcome::Ok {
             req_id: req_id.to_string(),
             output: Some(serde_json::value::to_raw_value(&json!({"copied": 1})).expect("json")),
+        }
+    }
+
+    fn silent() -> Outcome {
+        Outcome::Ok {
+            req_id: "w-0".to_string(),
+            output: None,
         }
     }
 
@@ -125,7 +143,7 @@ mod tests {
 
     /// A tally asked for everything, which is what a `map` asks for.
     fn returning_everything() -> Tally {
-        Tally::new(true, true)
+        Tally::new(true, true, false)
     }
 
     fn observe(tally: &mut Tally, outcome: Outcome, attempts: usize) {
@@ -238,6 +256,30 @@ mod tests {
         assert!(completed.outputs.is_empty());
         assert_eq!(completed.succeeded, 1);
         assert_eq!(completed.invocation_stats.len(), 1);
+    }
+
+    /// A null output gets no entry on the wire.
+    #[test]
+    fn a_worker_that_returned_nothing_has_no_output() {
+        let mut tally = returning_everything();
+        observe(&mut tally, silent(), 0);
+        let completed = tally.take_completed();
+        assert!(completed.outputs.is_empty());
+        assert_eq!(completed.succeeded, 1);
+    }
+
+    /// What a combiner needs, to cover every index that succeeded.
+    #[test]
+    fn asked_for_null_outputs_a_worker_that_returned_nothing_has_one() {
+        let mut tally = Tally {
+            null_outputs: true,
+            ..returning_everything()
+        };
+        tally.observe(3, invocation(silent(), 0, 1.0, 2.0));
+        let outputs = tally.take_completed().outputs;
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].index, 3);
+        assert_eq!(outputs[0].value.get(), "null");
     }
 
     #[test]

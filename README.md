@@ -190,9 +190,9 @@ The Python package is built with [maturin](https://www.maturin.rs/), so a Rust t
 
 In the `rust/` directory:
 
-`cargo lambda build --package echo --package map-lambda-dispatcher`
+`cargo lambda build --package echo --package map-lambda-dispatcher --package dispatcher-sum`
 
-`cargo test` runs the Rust unit tests for every crate in the workspace.
+`cargo test` runs the Rust unit tests for every crate in the workspace. `cargo test -p dispatcher-sum -- --ignored` runs the integration tests for combining, through the example combiner in `dispatcher-sum`, once the local server below is running.
 
 `cargo lambda watch` runs a local server at `http://localhost:9000` serving *every* lambda crate at once, routed by function name in the URL, rebuilding on file changes. It serves each function under its binary's name, so a session using it never prefixes names with a project.
 

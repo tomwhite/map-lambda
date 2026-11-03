@@ -819,6 +819,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dispatcher-sum"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "lambda_runtime",
+ "map-lambda-client",
+ "map-lambda-combiner",
+ "map-lambda-dispatcher",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1521,6 +1535,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "map-lambda-combiner"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "map-lambda-dispatcher"
 version = "0.1.0"
 dependencies = [
@@ -1534,6 +1555,7 @@ dependencies = [
  "futures",
  "http 1.5.0",
  "lambda_runtime",
+ "map-lambda-combiner",
  "map-lambda-protocol",
  "serde",
  "serde_json",

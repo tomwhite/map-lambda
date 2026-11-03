@@ -12,6 +12,7 @@ use crate::tally::Tally;
 use aws_sdk_lambda::Client as LambdaClient;
 use futures::stream::StreamExt;
 use lambda_runtime::Error;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time::MissedTickBehavior;
@@ -22,8 +23,16 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 /// Somewhere to report what a partition has finished, as it runs.
 ///
 /// An `Err` means the report cannot be delivered, and the partition stops.
+/// `Break` means the call can no longer succeed, so no more invocations
+/// start, though those in flight finish and are reported.
 pub(crate) trait ReportCallback {
-    async fn completed(&mut self, completed: Completed) -> Result<(), Error>;
+    async fn completed(&mut self, completed: Completed) -> Result<ControlFlow<()>, Error>;
+
+    /// Whether a worker that returned nothing still gets an `Output`, of
+    /// `null`, so its index is reported. Never on the wire.
+    fn wants_null_outputs(&self) -> bool {
+        false
+    }
 }
 
 /// Run one partition: invoke `worker_function` once per input, with
@@ -44,6 +53,8 @@ pub(crate) async fn dispatch<S: ReportCallback>(
         retries,
         return_stats,
         return_outputs,
+        // The handler's, which combines by wrapping the callback.
+        combine: _,
         // Already spent: the caller built the Lambda clients from it.
         endpoint_url: _,
     } = request;
@@ -52,20 +63,20 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     let connections = connections_for(max_in_flight).min(lambda_clients.len());
     let dispatched = inputs.len();
 
-    let mut tally = Tally::new(return_stats, return_outputs);
+    let mut tally = Tally::new(return_stats, return_outputs, callback.wants_null_outputs());
+    // The call can no longer succeed, and the client going away will not
+    // reach this dispatcher.
+    let failed = AtomicBool::new(false);
+    let failed = &failed;
 
     // Empty, but before any work, so "slow" and "never started" look
     // different from the client.
-    callback.completed(tally.take_completed()).await?;
+    report(tally.take_completed(), failed, callback).await?;
 
     let started = Instant::now();
     // Atomic because the handler's spawned task has to be `Send`.
     let in_flight: Vec<AtomicUsize> = (0..connections).map(|_| AtomicUsize::new(0)).collect();
     let in_flight = in_flight.as_slice();
-    // The call can no longer succeed, and the client going away will not
-    // reach this dispatcher.
-    let failed = AtomicBool::new(false);
-    let failed = &failed;
     // The invocations, started only as the loop below polls them.
     let mut results = futures::stream::iter(inputs.into_iter().enumerate())
         .take_while(|_| std::future::ready(!failed.load(Ordering::Relaxed)))
@@ -87,11 +98,11 @@ pub(crate) async fn dispatch<S: ReportCallback>(
         })
         .buffer_unordered(max_in_flight);
 
-    let mut report = tokio::time::interval_at(
+    let mut ticks = tokio::time::interval_at(
         tokio::time::Instant::now() + REPORT_INTERVAL,
         REPORT_INTERVAL,
     );
-    report.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // Each invocation as it finishes, reporting to the callback on a timer.
     loop {
@@ -100,10 +111,10 @@ pub(crate) async fn dispatch<S: ReportCallback>(
                 Some((index, invocation)) => tally.observe(index, invocation),
                 None => break,
             },
-            _ = report.tick() => {
+            _ = ticks.tick() => {
                 let completed = tally.take_completed();
                 if !completed.is_empty() {
-                    callback.completed(completed).await?;
+                    report(completed, failed, callback).await?;
                 }
             }
         }
@@ -112,7 +123,7 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     // Whatever the last tick missed.
     let completed = tally.take_completed();
     if !completed.is_empty() {
-        callback.completed(completed).await?;
+        report(completed, failed, callback).await?;
     }
 
     Ok(DispatcherStats {
@@ -124,6 +135,19 @@ pub(crate) async fn dispatch<S: ReportCallback>(
         connections,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+/// Report `completed`, and start no more invocations if the callback says
+/// the call can no longer succeed.
+async fn report<S: ReportCallback>(
+    completed: Completed,
+    failed: &AtomicBool,
+    callback: &mut S,
+) -> Result<(), Error> {
+    if callback.completed(completed).await?.is_break() {
+        failed.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// How many connections `max_in_flight` invocations need.
@@ -148,6 +172,7 @@ fn least_busy(in_flight: &[AtomicUsize]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{connections_for, dispatch, Completed, ReportCallback};
+    use crate::combine::Combining;
     use crate::protocol::{Request, MAX_IN_FLIGHT, MAX_LAMBDA_CLIENTS, STREAMS_PER_CONNECTION};
     use aws_config::retry::RetryConfig;
     use aws_credential_types::Credentials;
@@ -162,8 +187,11 @@ mod tests {
     use aws_smithy_runtime_api::shared::IntoShared;
     use aws_smithy_types::body::SdkBody;
     use lambda_runtime::Error;
+    use map_lambda_combiner::Combiner;
     use serde_json::json;
+    use serde_json::value::{to_raw_value, RawValue};
     use serde_json::Value;
+    use std::ops::ControlFlow;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -194,9 +222,9 @@ mod tests {
     }
 
     impl ReportCallback for Recorder {
-        async fn completed(&mut self, completed: Completed) -> Result<(), Error> {
+        async fn completed(&mut self, completed: Completed) -> Result<ControlFlow<()>, Error> {
             self.frames.push(completed);
-            Ok(())
+            Ok(ControlFlow::Continue(()))
         }
     }
 
@@ -204,7 +232,7 @@ mod tests {
     struct Gone;
 
     impl ReportCallback for Gone {
-        async fn completed(&mut self, _: Completed) -> Result<(), Error> {
+        async fn completed(&mut self, _: Completed) -> Result<ControlFlow<()>, Error> {
             Err(Error::from("the client has gone"))
         }
     }
@@ -381,9 +409,9 @@ mod tests {
     }
 
     impl ReportCallback for Timed {
-        async fn completed(&mut self, completed: Completed) -> Result<(), Error> {
+        async fn completed(&mut self, completed: Completed) -> Result<ControlFlow<()>, Error> {
             self.frames.push((self.started.elapsed(), completed));
-            Ok(())
+            Ok(ControlFlow::Continue(()))
         }
     }
 
@@ -705,6 +733,93 @@ mod tests {
 
         // The opening frame, the fast worker and the slow one.
         assert_eq!(callback.frames.len(), 3);
+    }
+
+    /// A callback that says the call can no longer succeed from the start,
+    /// as one wrapping a combiner that would not build does.
+    #[derive(Default)]
+    struct Stopping {
+        frames: Vec<Completed>,
+    }
+
+    impl ReportCallback for Stopping {
+        async fn completed(&mut self, completed: Completed) -> Result<ControlFlow<()>, Error> {
+            self.frames.push(completed);
+            Ok(ControlFlow::Break(()))
+        }
+    }
+
+    /// Takes a fifth of a second over each output.
+    struct Slow;
+
+    impl Combiner for Slow {
+        const NAME: &'static str = "slow";
+
+        fn new(_: Value) -> Result<Self, Error> {
+            Ok(Self)
+        }
+
+        fn combine(&mut self, _: &RawValue) -> Result<(), Error> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(())
+        }
+
+        fn finish(self) -> Result<Option<Box<RawValue>>, Error> {
+            Ok(Some(to_raw_value("done")?))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_callback_that_says_stop_starts_no_more_invocations() {
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok()]);
+        let mut callback = Stopping::default();
+
+        let stats = dispatch(
+            a_request(2),
+            "c-0".into(),
+            &lambda_clients,
+            None,
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        assert_eq!(callback.frames.len(), 1, "only the opening frame");
+        assert_eq!(stats.dispatched, 2);
+    }
+
+    // ---- dispatch: combining ----
+
+    /// One in flight, so a combine done inline would hold up each
+    /// invocation.
+    #[tokio::test]
+    async fn invocations_do_not_wait_on_the_combiner() {
+        let lambda_clients = replaying((0..3).map(|_| worker_ok()).collect());
+        let mut recorder = Recorder::default();
+        let mut combining = Combining::new(Slow, &mut recorder);
+        let request = Request {
+            max_in_flight: 1,
+            return_outputs: true,
+            ..a_request(3)
+        };
+
+        dispatch(request, "c-0".into(), &lambda_clients, None, &mut combining)
+            .await
+            .expect("dispatched");
+        combining.finish().await.expect("finished");
+
+        let starts: Vec<f64> = recorder
+            .frames
+            .iter()
+            .flat_map(|frame| &frame.invocation_stats)
+            .map(|stats| stats.invoke_start)
+            .collect();
+        assert_eq!(starts.len(), 3);
+        let spread = starts.iter().cloned().fold(f64::MIN, f64::max)
+            - starts.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(spread < 0.2, "the invocations spread over {spread}s");
+        let states: usize = recorder.frames.iter().map(|frame| frame.states.len()).sum();
+        assert_eq!(states, 1);
     }
 
     // ---- connections_for ----

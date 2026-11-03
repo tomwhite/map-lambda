@@ -1,0 +1,26 @@
+[package]
+name = "dispatcher-sum"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "dispatcher-sum"
+path = "src/main.rs"
+
+[package.metadata.lambda.deploy]
+memory = 3538
+timeout = 900
+
+[dependencies]
+lambda_runtime = "1.0.1"
+map-lambda-combiner = { path = "../combiner" }
+map-lambda-dispatcher = { path = "../dispatcher" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+tokio = { version = "1", features = ["macros"] }
+
+[dev-dependencies]
+futures = "0.3"
+map-lambda-client = { path = "../client" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

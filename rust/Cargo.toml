@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "client",
+    "combiner",
     "dispatcher",
+    "dispatcher-sum",
     "echo",
     "protocol",
     "python",

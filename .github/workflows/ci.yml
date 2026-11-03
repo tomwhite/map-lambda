@@ -90,7 +90,7 @@ jobs:
       # `watch` compiles each function on its first request, and the tests
       # fail on a read timeout rather than waiting - so pay for the build
       # here, where nothing is on the clock.
-      - run: cargo build --locked -p map-lambda-dispatcher -p echo
+      - run: cargo build --locked -p map-lambda-dispatcher -p dispatcher-sum -p echo
         working-directory: rust
 
       - name: Serve the lambdas
@@ -113,6 +113,9 @@ jobs:
           exit 1
 
       - run: uv run pytest -m lambda_integration
+
+      - run: cargo test --locked -p dispatcher-sum -- --ignored
+        working-directory: rust
 
       - name: Stop the lambdas
         if: always()

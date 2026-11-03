@@ -1,8 +1,10 @@
 //! A session with the deployed lambdas, and the calls made through it.
 
 use crate::call::{start, Batches, Call};
+use crate::combine::{start_combining, CombineBatches};
 use crate::invoker::{connect, Invoker};
 use crate::Error;
+use map_lambda_protocol::Combine;
 use serde_json::{Map, Value};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -81,6 +83,25 @@ impl Session {
         self.start(worker.into(), inputs, input_key, constant_args, false)
     }
 
+    /// [`map_unordered`](Self::map_unordered), with each dispatcher
+    /// combining its outputs, and streaming back states in place of the
+    /// outputs. Merging the states is the caller's responsibility.
+    ///
+    /// Calls the combining dispatcher for `combine`'s combiner, named by the
+    /// dispatcher's name, `-`, and the combiner.
+    pub fn map_combine(
+        &self,
+        worker: impl Into<Worker>,
+        inputs: Vec<Value>,
+        input_key: &str,
+        constant_args: Map<String, Value>,
+        combine: Combine,
+    ) -> Result<CombineBatches, Error> {
+        let mut call = self.call(worker.into(), input_key, constant_args, true);
+        call.dispatcher_function = format!("{}-{}", call.dispatcher_function, combine.combiner);
+        start_combining(self.invoker.clone(), call, combine, inputs)
+    }
+
     /// Invoke `function` once with `payload`, without waiting for it to run.
     pub fn invoke_detached(
         &self,
@@ -108,8 +129,19 @@ impl Session {
         constant_args: Map<String, Value>,
         return_outputs: bool,
     ) -> Result<Batches, Error> {
+        let call = self.call(worker, input_key, constant_args, return_outputs);
+        start(self.invoker.clone(), call, inputs)
+    }
+
+    fn call(
+        &self,
+        worker: Worker,
+        input_key: &str,
+        constant_args: Map<String, Value>,
+        return_outputs: bool,
+    ) -> Call {
         let settings = &self.settings;
-        let call = Call {
+        Call {
             dispatcher_function: self.function_name(&Worker::from(DISPATCHER)),
             worker_function: self.function_name(&worker),
             input_key: input_key.to_string(),
@@ -121,8 +153,7 @@ impl Session {
             return_outputs,
             return_stats: settings.return_stats,
             number: self.calls.fetch_add(1, Ordering::Relaxed),
-        };
-        start(self.invoker.clone(), call, inputs)
+        }
     }
 }
 
@@ -493,7 +524,7 @@ mod tests {
 
         let error = block_on(batches.finish()).expect_err("failed");
         assert!(
-            matches!(error, Error::InvocationFailed(ref message) if message == "boom"),
+            matches!(error, Error::PartitionFailed(ref message) if message == "boom"),
             "{error}"
         );
     }
