@@ -9,23 +9,6 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// What became of one invocation.
-#[derive(Debug)]
-pub(crate) enum Outcome {
-    Ok {
-        req_id: String,
-        /// The worker's whole response body, unparsed. `None` for a
-        /// worker that returned null.
-        output: Option<Box<RawValue>>,
-    },
-    /// Lambda ran the worker and the worker failed.
-    Function(String),
-    /// The request never reached a working worker.
-    Transport(String),
-    /// Lambda refused the request, and would refuse it again.
-    Rejected(String),
-}
-
 /// Error codes that another attempt can't change. Anything not listed is
 /// retried.
 const PERMANENT_ERROR_CODES: [&str; 6] = [
@@ -37,41 +20,37 @@ const PERMANENT_ERROR_CODES: [&str; 6] = [
     "UnsupportedMediaTypeException",
 ];
 
-/// An invocation Lambda ran without the error channel firing: a
-/// success, whatever the body says.
-///
-/// A body that is not JSON comes through as `None`, the same as
-/// returning null, rather than failing the invocation. `req_id` is the
-/// response's `x-amzn-requestid`, as in `read_error_channel`.
-pub(crate) fn read_body(req_id: &str, body: Option<&[u8]>) -> Outcome {
-    Outcome::Ok {
-        req_id: req_id.to_string(),
-        output: body
-            .and_then(|bytes| serde_json::from_slice::<Box<RawValue>>(bytes).ok())
-            .filter(|output| output.get() != "null"),
-    }
+/// Bounds on the wait between attempts after a failed invoke.
+const RETRY_BASE_MS: u64 = 500;
+const RETRY_CAP_MS: u64 = 8_000;
+
+/// What one invocation came to.
+pub(crate) struct Invocation {
+    pub(crate) outcome: Outcome,
+    /// Attempts beyond the first.
+    pub(crate) retried: usize,
+    pub(crate) invoke_start: f64,
+    pub(crate) invoke_end: f64,
+    /// Waited between attempts, which the interval above includes.
+    pub(crate) waited_ms: f64,
 }
 
-/// What Lambda's error channel is saying.
-///
-/// `req_id` is the response's `x-amzn-requestid` header.
-pub(crate) fn read_error_channel(
-    function_error: &str,
-    req_id: &str,
-    payload: Option<&[u8]>,
-) -> Outcome {
-    let message = payload
-        .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-        .and_then(|parsed| {
-            parsed
-                .get("errorMessage")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    Outcome::Function(match message {
-        Some(message) => format!("{message} ({function_error} function error, req_id={req_id})"),
-        None => format!("{function_error} (function error, req_id={req_id})"),
-    })
+/// What became of one invocation.
+#[derive(Debug)]
+pub(crate) enum Outcome {
+    Ok {
+        req_id: String,
+        /// The worker's whole response body, unparsed. `None` for a
+        /// worker that returned null.
+        output: Option<Box<RawValue>>,
+    },
+    /// Lambda ran the worker and the worker failed.
+    WorkerFailed(String),
+    /// The invoke call failed for a reason another attempt might fix, such
+    /// as throttling or a lost connection. The worker may still have run.
+    InvokeFailed(String),
+    /// Lambda refused the request, and would refuse it again.
+    Rejected(String),
 }
 
 /// The worker payload for one invocation: `constant_args` with this
@@ -86,11 +65,86 @@ pub(crate) fn payload_for(
     Value::Object(body).to_string().into_bytes()
 }
 
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is after 1970")
-        .as_secs_f64()
+/// One invocation, with `retries` further attempts after a failed invoke,
+/// which excludes a rejection.
+pub(crate) async fn invoke_with_retries(
+    client: &LambdaClient,
+    worker_function: &str,
+    payload: Vec<u8>,
+    retries: usize,
+) -> Invocation {
+    let start = now();
+    let mut attempts_beyond_first = 0;
+    let mut waited_ms = 0.0;
+    loop {
+        let outcome = match client
+            .invoke()
+            .function_name(worker_function)
+            .payload(Blob::new(payload.clone()))
+            .send()
+            .await
+        {
+            Ok(invoked) => read_response(
+                invoked.request_id().unwrap_or_default(),
+                invoked.function_error(),
+                invoked.payload().map(|blob| blob.as_ref()),
+            ),
+            Err(e) => match e.code() {
+                Some(code) if PERMANENT_ERROR_CODES.contains(&code) => Outcome::Rejected(format!(
+                    "{code} invoking {worker_function}: {}",
+                    e.message().unwrap_or("no message")
+                )),
+                _ => Outcome::InvokeFailed(error_chain(&e)),
+            },
+        };
+        if !matches!(outcome, Outcome::InvokeFailed(_)) || attempts_beyond_first >= retries {
+            return Invocation {
+                outcome,
+                retried: attempts_beyond_first,
+                invoke_start: start,
+                invoke_end: now(),
+                waited_ms,
+            };
+        }
+        let wait = backoff_ms(attempts_beyond_first);
+        waited_ms += wait as f64;
+        tokio::time::sleep(Duration::from_millis(wait)).await;
+        attempts_beyond_first += 1;
+    }
+}
+
+/// What became of an invocation Lambda answered.
+///
+/// A worker's failure arrives as an HTTP 200 like a success, told apart by
+/// `function_error`, Lambda's `X-Amz-Function-Error` header. A success's
+/// body that is not JSON comes through as `None`, the same as returning
+/// null, rather than failing the invocation. `req_id` is the response's
+/// `x-amzn-requestid` header.
+fn read_response(req_id: &str, function_error: Option<&str>, payload: Option<&[u8]>) -> Outcome {
+    match function_error {
+        None => Outcome::Ok {
+            req_id: req_id.to_string(),
+            output: payload
+                .and_then(|bytes| serde_json::from_slice::<Box<RawValue>>(bytes).ok())
+                .filter(|output| output.get() != "null"),
+        },
+        Some(function_error) => {
+            let message = payload
+                .and_then(|body| serde_json::from_slice::<Value>(body).ok())
+                .and_then(|parsed| {
+                    parsed
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            Outcome::WorkerFailed(match message {
+                Some(message) => {
+                    format!("{message} ({function_error} function error, req_id={req_id})")
+                }
+                None => format!("{function_error} (function error, req_id={req_id})"),
+            })
+        }
+    }
 }
 
 /// Every message in an error's source chain, joined by ": ".
@@ -111,88 +165,27 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     message
 }
 
-/// Bounds on the wait between attempts at a transport failure. Full
-/// jitter - the wait is sampled from the whole range rather than centred
-/// on it - because a throttle refuses every invocation at once, and an
-/// unspread retry arrives as the same herd.
-const RETRY_BASE_MS: u64 = 500;
-const RETRY_CAP_MS: u64 = 8_000;
-
+/// Full jitter - the wait is sampled from the whole range rather than
+/// centred on it - because a throttle refuses every invocation at once,
+/// and an unspread retry arrives as the same herd.
 fn backoff_ms(attempts_beyond_first: usize) -> u64 {
     let ceiling =
         (0..attempts_beyond_first).fold(RETRY_BASE_MS, |ms, _| (ms * 2).min(RETRY_CAP_MS));
     fastrand::u64(0..=ceiling)
 }
 
-/// What one invocation came to.
-pub(crate) struct Invocation {
-    pub(crate) outcome: Outcome,
-    /// Attempts beyond the first.
-    pub(crate) retried: usize,
-    pub(crate) invoke_start: f64,
-    pub(crate) invoke_end: f64,
-    /// Waited between attempts, which the interval above includes.
-    pub(crate) waited_ms: f64,
-}
-
-/// One invocation, with `retries` further attempts after a *transport*
-/// failure, which excludes a rejection.
-pub(crate) async fn invoke_with_retries(
-    client: &LambdaClient,
-    worker_function: &str,
-    payload: Vec<u8>,
-    retries: usize,
-) -> Invocation {
-    let start = now();
-    let mut attempts_beyond_first = 0;
-    let mut waited_ms = 0.0;
-    loop {
-        let outcome = match client
-            .invoke()
-            .function_name(worker_function)
-            .payload(Blob::new(payload.clone()))
-            .send()
-            .await
-        {
-            // A function error is an HTTP 200, not an `Err`.
-            Ok(invoked) if invoked.function_error().is_some() => read_error_channel(
-                invoked.function_error().unwrap_or_default(),
-                invoked.request_id().unwrap_or_default(),
-                invoked.payload().map(|blob| blob.as_ref()),
-            ),
-            Ok(invoked) => read_body(
-                invoked.request_id().unwrap_or_default(),
-                invoked.payload().map(|blob| blob.as_ref()),
-            ),
-            Err(e) => match e.code() {
-                Some(code) if PERMANENT_ERROR_CODES.contains(&code) => Outcome::Rejected(format!(
-                    "{code} invoking {worker_function}: {}",
-                    e.message().unwrap_or("no message")
-                )),
-                _ => Outcome::Transport(error_chain(&e)),
-            },
-        };
-        if !matches!(outcome, Outcome::Transport(_)) || attempts_beyond_first >= retries {
-            return Invocation {
-                outcome,
-                retried: attempts_beyond_first,
-                invoke_start: start,
-                invoke_end: now(),
-                waited_ms,
-            };
-        }
-        let wait = backoff_ms(attempts_beyond_first);
-        waited_ms += wait as f64;
-        tokio::time::sleep(Duration::from_millis(wait)).await;
-        attempts_beyond_first += 1;
-    }
+fn now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs_f64()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        backoff_ms, error_chain, invoke_with_retries, payload_for, read_body, read_error_channel,
-        LambdaClient, Outcome, RETRY_BASE_MS, RETRY_CAP_MS,
+        backoff_ms, error_chain, invoke_with_retries, payload_for, read_response, LambdaClient,
+        Outcome, RETRY_BASE_MS, RETRY_CAP_MS,
     };
     use aws_config::retry::RetryConfig;
     use aws_credential_types::Credentials;
@@ -200,10 +193,8 @@ mod tests {
     use aws_smithy_types::body::SdkBody;
     use serde_json::{json, Map, Value};
 
-    // ---- the retry loop ----
-    //
     // A replay client that runs out of events fails with `ConnectorError`, a
-    // transport error, so "it stopped after exactly N attempts" is
+    // failed invoke, so "it stopped after exactly N attempts" is
     // assertable by counting the requests actually made.
 
     /// What Lambda returns for an invocation that ran and succeeded.
@@ -230,9 +221,9 @@ mod tests {
             .expect("a valid response")
     }
 
-    /// The request never got a usable output - the transport-error case
-    /// a GOAWAY lands in.
-    fn transport_failed() -> http::Response<SdkBody> {
+    /// The request never got a usable output - the failed invoke a
+    /// GOAWAY lands in.
+    fn invoke_failed() -> http::Response<SdkBody> {
         http::Response::builder()
             .status(500)
             .body(SdkBody::from("{}"))
@@ -296,311 +287,7 @@ mod tests {
         )
     }
 
-    // ---- the backoff ----
-
-    #[test]
-    fn the_wait_doubles_until_it_reaches_the_cap() {
-        let most = |attempt| {
-            (0..500)
-                .map(|_| backoff_ms(attempt))
-                .max()
-                .expect("samples")
-        };
-        assert!(most(0) <= RETRY_BASE_MS);
-        assert!(most(1) > RETRY_BASE_MS);
-        assert!(most(20) <= RETRY_CAP_MS);
-    }
-
-    /// The whole point of the jitter: a fixed wait would bring every
-    /// invocation back at the same instant, which is what throttled them.
-    #[test]
-    fn two_invocations_do_not_wait_the_same_time() {
-        let waits: std::collections::HashSet<u64> = (0..50).map(|_| backoff_ms(2)).collect();
-        assert!(waits.len() > 1, "{waits:?}");
-    }
-
-    /// `start_paused` advances the clock for the sleep, so this asserts
-    /// the wiring without waiting for it.
-    #[tokio::test(start_paused = true)]
-    async fn a_transport_failure_waits_before_the_next_attempt() {
-        let (client, http_client) = replaying(vec![
-            transport_failed(),
-            transport_failed(),
-            worker_ok("w-1"),
-        ]);
-        let before = tokio::time::Instant::now();
-        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
-
-        assert!(matches!(invocation.outcome, Outcome::Ok { .. }));
-        assert_eq!(attempts_made(&http_client), 3);
-        // every millisecond that passed was one this chose to wait
-        assert_eq!(before.elapsed().as_millis() as f64, invocation.waited_ms);
-    }
-
-    /// A worker that raised will raise again on the same payload, so the
-    /// further attempts only bill for a run that is already lost.
-    #[tokio::test(start_paused = true)]
-    async fn a_function_error_is_not_retried() {
-        let (client, _) = replaying(vec![
-            worker_panicked("one"),
-            worker_ok("never reached"),
-            worker_ok("never reached"),
-        ]);
-        let before = tokio::time::Instant::now();
-        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
-
-        assert!(matches!(invocation.outcome, Outcome::Function(_)));
-        assert_eq!(invocation.retried, 0);
-        assert_eq!(invocation.waited_ms, 0.0);
-        assert_eq!(before.elapsed().as_millis(), 0);
-    }
-
-    #[tokio::test]
-    async fn a_first_attempt_success_is_not_retried() {
-        let (outcome, retried, attempts) = invoke(vec![worker_ok("w-1")], 2).await;
-        assert!(matches!(outcome, Outcome::Ok { ref req_id, .. } if req_id == "w-1"));
-        assert_eq!(retried, 0);
-        assert_eq!(attempts, 1, "a success must not be re-sent");
-    }
-
-    /// The branch a GOAWAY takes.
-    #[tokio::test]
-    async fn a_transport_failure_is_retried_and_recovers() {
-        let (outcome, retried, attempts) =
-            invoke(vec![transport_failed(), worker_ok("w-3")], 2).await;
-        assert!(matches!(outcome, Outcome::Ok { .. }));
-        assert_eq!(retried, 1);
-        assert_eq!(attempts, 2);
-    }
-
-    #[tokio::test]
-    async fn two_transport_failures_inside_the_budget_still_succeed() {
-        let (outcome, retried, attempts) = invoke(
-            vec![transport_failed(), transport_failed(), worker_ok("w-4")],
-            2,
-        )
-        .await;
-        assert!(matches!(outcome, Outcome::Ok { .. }));
-        assert_eq!(retried, 2);
-        assert_eq!(attempts, 3);
-    }
-
-    /// More failures are queued than the budget allows, so "it stopped"
-    /// is the count of requests actually made rather than the absence of
-    /// a further output.
-    #[tokio::test]
-    async fn an_invocation_that_never_succeeds_stops_after_exactly_retries() {
-        let (outcome, retried, attempts) = invoke(
-            vec![
-                transport_failed(),
-                transport_failed(),
-                transport_failed(),
-                worker_ok("never reached"),
-                worker_ok("never reached"),
-            ],
-            2,
-        )
-        .await;
-        assert!(matches!(outcome, Outcome::Transport(_)));
-        assert_eq!(retried, 2);
-        assert_eq!(attempts, 3, "retries=2 is three attempts, not four");
-    }
-
-    #[tokio::test]
-    async fn zero_retries_is_a_single_attempt() {
-        let (outcome, retried, attempts) = invoke(
-            vec![worker_panicked("only try"), worker_ok("never reached")],
-            0,
-        )
-        .await;
-        assert!(matches!(outcome, Outcome::Function(_)));
-        assert_eq!(retried, 0);
-        assert_eq!(attempts, 1);
-    }
-
-    /// No wait either: every invocation of a run fails this way, and the
-    /// call should say so at once.
-    #[tokio::test(start_paused = true)]
-    async fn a_missing_permission_is_not_retried() {
-        let (client, http_client) = replaying(vec![
-            rejected(403, "AccessDeniedException", "role is not authorized"),
-            worker_ok("never reached"),
-        ]);
-        let before = tokio::time::Instant::now();
-        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
-
-        match invocation.outcome {
-            Outcome::Rejected(message) => assert_eq!(
-                message,
-                "AccessDeniedException invoking echo: role is not authorized"
-            ),
-            other => panic!("expected a rejection, got {other:?}"),
-        }
-        assert_eq!(invocation.retried, 0);
-        assert_eq!(attempts_made(&http_client), 1);
-        assert_eq!(before.elapsed().as_millis(), 0);
-    }
-
-    #[tokio::test]
-    async fn a_missing_function_is_not_retried() {
-        let (outcome, retried, attempts) = invoke(
-            vec![
-                rejected(404, "ResourceNotFoundException", "Function not found"),
-                worker_ok("never reached"),
-            ],
-            2,
-        )
-        .await;
-        assert!(matches!(outcome, Outcome::Rejected(_)));
-        assert_eq!(retried, 0);
-        assert_eq!(attempts, 1);
-    }
-
-    /// Throttling is not permanent: the same request can succeed later.
-    #[tokio::test(start_paused = true)]
-    async fn a_throttle_is_retried() {
-        let (outcome, retried, attempts) = invoke(
-            vec![
-                rejected(429, "TooManyRequestsException", "Rate exceeded"),
-                worker_ok("w-5"),
-            ],
-            2,
-        )
-        .await;
-        assert!(matches!(outcome, Outcome::Ok { .. }));
-        assert_eq!(retried, 1);
-        assert_eq!(attempts, 2);
-    }
-
-    /// Unlike `first_error`, which is the first across *invocations*,
-    /// a single invocation reports its **last** attempt.
-    #[tokio::test]
-    async fn an_invocation_reports_its_last_attempt_not_its_first() {
-        let (outcome, _, _) = invoke(
-            vec![
-                transport_failed(),
-                transport_failed(),
-                worker_panicked("the last"),
-            ],
-            2,
-        )
-        .await;
-        match outcome {
-            Outcome::Function(message) => assert!(
-                message.contains("the last"),
-                "expected the last attempt's message, got {message:?}"
-            ),
-            other => panic!("expected a function error, got {other:?}"),
-        }
-    }
-
-    /// Lambda's error channel is an HTTP 200, so it is not an `Err` on
-    /// the SDK call and has to be checked explicitly.
-    #[tokio::test]
-    async fn an_unhandled_worker_error_is_a_function_error() {
-        let (outcome, retried, attempts) =
-            invoke(vec![worker_panicked("boom"), worker_ok("never reached")], 2).await;
-        assert!(matches!(outcome, Outcome::Function(_)));
-        assert_eq!(retried, 0);
-        assert_eq!(
-            attempts, 1,
-            "a worker that raised is not sent the same payload again"
-        );
-    }
-
-    /// Through the real SDK client, since the id comes from a header.
-    #[tokio::test]
-    async fn an_error_channel_failure_carries_its_message_and_request_id() {
-        let (outcome, _, _) = invoke(vec![worker_panicked("chunk 3 is short")], 0).await;
-        match outcome {
-            Outcome::Function(message) => {
-                assert!(
-                    message.contains("chunk 3 is short"),
-                    "expected the runtime's errorMessage, got {message:?}"
-                );
-                assert!(
-                    message.contains("req_id=w-panic"),
-                    "expected the CloudWatch join key, got {message:?}"
-                );
-                assert!(
-                    message.contains("Unhandled"),
-                    "expected the error channel to be named, got {message:?}"
-                );
-            }
-            other => panic!("expected a function error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_error_channel_with_no_message_still_carries_its_request_id() {
-        match read_error_channel("Unhandled", "w-7", Some(b"not json")) {
-            Outcome::Function(message) => {
-                assert_eq!(message, "Unhandled (function error, req_id=w-7)");
-            }
-            other => panic!("expected a function error, got {other:?}"),
-        }
-    }
-
-    /// A nestable error, for building the shape an SDK error has.
-    #[derive(Debug)]
-    struct Layer(&'static str, Option<Box<Layer>>);
-
-    impl std::fmt::Display for Layer {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.0)
-        }
-    }
-
-    impl std::error::Error for Layer {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.1
-                .as_deref()
-                .map(|layer| layer as &dyn std::error::Error)
-        }
-    }
-
-    #[test]
-    fn an_error_reports_every_message_in_its_chain() {
-        let error = Layer(
-            "service error",
-            Some(Box::new(Layer(
-                "unhandled error (AccessDeniedException)",
-                Some(Box::new(Layer(
-                    "not authorized to perform: lambda:InvokeFunction",
-                    None,
-                ))),
-            ))),
-        );
-        assert_eq!(
-            error_chain(&error),
-            "service error: unhandled error (AccessDeniedException): \
-             not authorized to perform: lambda:InvokeFunction"
-        );
-    }
-
-    #[test]
-    fn an_error_message_is_not_followed_by_a_debug_dump_of_itself() {
-        let error = Layer("boom", Some(Box::new(Layer("connection reset", None))));
-        assert_eq!(error_chain(&error), "boom: connection reset");
-    }
-
-    /// The stats record covers every attempt, not just the one that
-    /// worked, or retried invocations would look as quick as the rest.
-    #[tokio::test]
-    async fn the_timing_spans_every_attempt() {
-        let (client, _) = replaying(vec![
-            worker_panicked("one"),
-            worker_panicked("two"),
-            worker_ok("w-6"),
-        ]);
-        let before = super::now();
-        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
-        assert!(
-            invocation.invoke_start >= before,
-            "start is stamped before the first attempt"
-        );
-        assert!(invocation.invoke_end >= invocation.invoke_start);
-    }
+    // ---- payload_for ----
 
     fn some_constant_args() -> Map<String, Value> {
         json!({
@@ -649,9 +336,186 @@ mod tests {
         assert_eq!(body["i"], json!(7));
     }
 
+    // ---- invoke_with_retries ----
+
+    #[tokio::test]
+    async fn a_first_attempt_success_is_not_retried() {
+        let (outcome, retried, attempts) = invoke(vec![worker_ok("w-1")], 2).await;
+        assert!(matches!(outcome, Outcome::Ok { ref req_id, .. } if req_id == "w-1"));
+        assert_eq!(retried, 0);
+        assert_eq!(attempts, 1, "a success must not be re-sent");
+    }
+
+    /// A worker that raised will raise again on the same payload, so the
+    /// further attempts only bill for a run that is already lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_failure_is_not_retried() {
+        let (client, _) = replaying(vec![
+            worker_panicked("one"),
+            worker_ok("never reached"),
+            worker_ok("never reached"),
+        ]);
+        let before = tokio::time::Instant::now();
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+
+        assert!(matches!(invocation.outcome, Outcome::WorkerFailed(_)));
+        assert_eq!(invocation.retried, 0);
+        assert_eq!(invocation.waited_ms, 0.0);
+        assert_eq!(before.elapsed().as_millis(), 0);
+    }
+
+    /// The branch a GOAWAY takes.
+    #[tokio::test]
+    async fn a_failed_invoke_is_retried_and_recovers() {
+        let (outcome, retried, attempts) = invoke(vec![invoke_failed(), worker_ok("w-3")], 2).await;
+        assert!(matches!(outcome, Outcome::Ok { .. }));
+        assert_eq!(retried, 1);
+        assert_eq!(attempts, 2);
+    }
+
+    /// Throttling is not permanent: the same request can succeed later.
+    #[tokio::test(start_paused = true)]
+    async fn a_throttle_is_retried() {
+        let (outcome, retried, attempts) = invoke(
+            vec![
+                rejected(429, "TooManyRequestsException", "Rate exceeded"),
+                worker_ok("w-5"),
+            ],
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Ok { .. }));
+        assert_eq!(retried, 1);
+        assert_eq!(attempts, 2);
+    }
+
+    /// No wait either: every invocation of a run fails this way, and the
+    /// call should say so at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_permission_is_not_retried() {
+        let (client, http_client) = replaying(vec![
+            rejected(403, "AccessDeniedException", "role is not authorized"),
+            worker_ok("never reached"),
+        ]);
+        let before = tokio::time::Instant::now();
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+
+        match invocation.outcome {
+            Outcome::Rejected(message) => assert_eq!(
+                message,
+                "AccessDeniedException invoking echo: role is not authorized"
+            ),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        assert_eq!(invocation.retried, 0);
+        assert_eq!(attempts_made(&http_client), 1);
+        assert_eq!(before.elapsed().as_millis(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_missing_function_is_not_retried() {
+        let (outcome, retried, attempts) = invoke(
+            vec![
+                rejected(404, "ResourceNotFoundException", "Function not found"),
+                worker_ok("never reached"),
+            ],
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Rejected(_)));
+        assert_eq!(retried, 0);
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn zero_retries_is_a_single_attempt() {
+        let (outcome, retried, attempts) =
+            invoke(vec![invoke_failed(), worker_ok("never reached")], 0).await;
+        assert!(matches!(outcome, Outcome::InvokeFailed(_)));
+        assert_eq!(retried, 0);
+        assert_eq!(attempts, 1);
+    }
+
+    /// More failures are queued than the budget allows, so "it stopped"
+    /// is the count of requests actually made rather than the absence of
+    /// a further output.
+    #[tokio::test]
+    async fn an_invocation_that_never_succeeds_stops_after_exactly_retries() {
+        let (outcome, retried, attempts) = invoke(
+            vec![
+                invoke_failed(),
+                invoke_failed(),
+                invoke_failed(),
+                worker_ok("never reached"),
+                worker_ok("never reached"),
+            ],
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::InvokeFailed(_)));
+        assert_eq!(retried, 2);
+        assert_eq!(attempts, 3, "retries=2 is three attempts, not four");
+    }
+
+    /// Unlike `first_error`, which is the first across *invocations*,
+    /// a single invocation reports its **last** attempt.
+    #[tokio::test]
+    async fn an_invocation_reports_its_last_attempt_not_its_first() {
+        let (outcome, _, _) = invoke(
+            vec![
+                invoke_failed(),
+                invoke_failed(),
+                worker_panicked("the last"),
+            ],
+            2,
+        )
+        .await;
+        match outcome {
+            Outcome::WorkerFailed(message) => assert!(
+                message.contains("the last"),
+                "expected the last attempt's message, got {message:?}"
+            ),
+            other => panic!("expected a worker failure, got {other:?}"),
+        }
+    }
+
+    /// `start_paused` advances the clock for the sleep, so this asserts
+    /// the wiring without waiting for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_invoke_waits_before_the_next_attempt() {
+        let (client, http_client) =
+            replaying(vec![invoke_failed(), invoke_failed(), worker_ok("w-1")]);
+        let before = tokio::time::Instant::now();
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+
+        assert!(matches!(invocation.outcome, Outcome::Ok { .. }));
+        assert_eq!(attempts_made(&http_client), 3);
+        // every millisecond that passed was one this chose to wait
+        assert_eq!(before.elapsed().as_millis() as f64, invocation.waited_ms);
+    }
+
+    /// The stats record covers every attempt, not just the one that
+    /// worked, or retried invocations would look as quick as the rest.
+    #[tokio::test]
+    async fn the_timing_spans_every_attempt() {
+        let (client, _) = replaying(vec![invoke_failed(), invoke_failed(), worker_ok("w-6")]);
+        let before = super::now();
+        let invocation = invoke_with_retries(&client, "echo", b"{}".to_vec(), 2).await;
+        assert_eq!(invocation.retried, 2);
+        assert!(
+            invocation.invoke_start >= before,
+            "start is stamped before the first attempt"
+        );
+        // The waits fall between attempts, so only an interval running from
+        // the first attempt to the last can contain them.
+        assert!((invocation.invoke_end - invocation.invoke_start) * 1000.0 >= invocation.waited_ms);
+    }
+
+    // ---- read_response ----
+
     #[test]
     fn a_success_takes_its_request_id_from_the_response() {
-        match read_body("abc-123", Some(br#"{"written":1}"#)) {
+        match read_response("abc-123", None, Some(br#"{"written":1}"#)) {
             Outcome::Ok { req_id, output } => {
                 assert_eq!(req_id, "abc-123");
                 assert_eq!(output.expect("an output").get(), r#"{"written":1}"#);
@@ -668,7 +532,7 @@ mod tests {
             Some(&b""[..]),
             Some(&b" null\n"[..]),
         ] {
-            match read_body("abc-123", body) {
+            match read_response("abc-123", None, body) {
                 Outcome::Ok { req_id, output } => {
                     assert_eq!(req_id, "abc-123");
                     assert!(output.is_none(), "{output:?}");
@@ -676,5 +540,106 @@ mod tests {
                 other => panic!("expected success, got {other:?}"),
             }
         }
+    }
+
+    /// Through the real SDK client, since the id comes from a header.
+    #[tokio::test]
+    async fn an_error_channel_failure_carries_its_message_and_request_id() {
+        let (outcome, _, _) = invoke(vec![worker_panicked("chunk 3 is short")], 0).await;
+        match outcome {
+            Outcome::WorkerFailed(message) => {
+                assert!(
+                    message.contains("chunk 3 is short"),
+                    "expected the runtime's errorMessage, got {message:?}"
+                );
+                assert!(
+                    message.contains("req_id=w-panic"),
+                    "expected the CloudWatch join key, got {message:?}"
+                );
+                assert!(
+                    message.contains("Unhandled"),
+                    "expected the error channel to be named, got {message:?}"
+                );
+            }
+            other => panic!("expected a worker failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_error_channel_with_no_message_still_carries_its_request_id() {
+        match read_response("w-7", Some("Unhandled"), Some(b"not json")) {
+            Outcome::WorkerFailed(message) => {
+                assert_eq!(message, "Unhandled (function error, req_id=w-7)");
+            }
+            other => panic!("expected a worker failure, got {other:?}"),
+        }
+    }
+
+    // ---- error_chain ----
+
+    /// A nestable error, for building the shape an SDK error has.
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|layer| layer as &dyn std::error::Error)
+        }
+    }
+
+    #[test]
+    fn an_error_reports_every_message_in_its_chain() {
+        let error = Layer(
+            "service error",
+            Some(Box::new(Layer(
+                "unhandled error (AccessDeniedException)",
+                Some(Box::new(Layer(
+                    "not authorized to perform: lambda:InvokeFunction",
+                    None,
+                ))),
+            ))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "service error: unhandled error (AccessDeniedException): \
+             not authorized to perform: lambda:InvokeFunction"
+        );
+    }
+
+    #[test]
+    fn an_error_message_is_not_followed_by_a_debug_dump_of_itself() {
+        let error = Layer("boom", Some(Box::new(Layer("connection reset", None))));
+        assert_eq!(error_chain(&error), "boom: connection reset");
+    }
+
+    // ---- backoff_ms ----
+
+    #[test]
+    fn the_wait_doubles_until_it_reaches_the_cap() {
+        let most = |attempt| {
+            (0..500)
+                .map(|_| backoff_ms(attempt))
+                .max()
+                .expect("samples")
+        };
+        assert!(most(0) <= RETRY_BASE_MS);
+        assert!(most(1) > RETRY_BASE_MS);
+        assert!(most(20) <= RETRY_CAP_MS);
+    }
+
+    /// The whole point of the jitter: a fixed wait would bring every
+    /// invocation back at the same instant, which is what throttled them.
+    #[test]
+    fn two_invocations_do_not_wait_the_same_time() {
+        let waits: std::collections::HashSet<u64> = (0..50).map(|_| backoff_ms(2)).collect();
+        assert!(waits.len() > 1, "{waits:?}");
     }
 }

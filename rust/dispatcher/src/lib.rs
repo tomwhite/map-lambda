@@ -12,11 +12,13 @@
 //! ```
 #![warn(missing_docs)]
 
-// - `lambda_clients` - the Lambda clients, and how many there have to be.
-// - `invoke` - one worker invocation, with retries.
-// - `tally` - what the partition has come to so far.
-// - `dispatch` - the loop that turns inputs into invocations.
+// A request flows `main` -> `run` -> `handler` -> `dispatch` -> `invoke`:
+//
 // - `handler` - response streaming, and the entry point.
+// - `lambda_clients` - the Lambda clients, which `handler` gets.
+// - `dispatch` - the loop that turns inputs into invocations.
+// - `invoke` - one worker invocation, with retries.
+// - `tally` - what the partition has come to so far, kept by `dispatch`.
 
 use lambda_runtime::{run as lambda_run, service_fn, tracing, Error};
 use map_lambda_protocol as protocol;

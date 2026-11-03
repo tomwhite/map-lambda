@@ -56,7 +56,7 @@ def test_map_yields_each_answer_and_records_the_partition():
 
     assert outputs == [{"doubled": 2}, {"doubled": 4}]
     assert len(partitions) == 1
-    assert partitions[0]["succeeded"] == 2
+    assert partitions[0]["dispatched"] == 2
 
 
 def test_map_passes_the_template_and_the_session_settings_through():
@@ -160,7 +160,7 @@ def test_the_module_level_map_collects_stats_into_the_caller_s_own_lists(monkeyp
     )
 
     assert len(partitions) == 1
-    assert partitions[0]["succeeded"] == 2
+    assert partitions[0]["dispatched"] == 2
     assert partitions[0]["call"] == 0
 
 
@@ -241,7 +241,7 @@ def test_invoke_raises_when_it_could_not_be_submitted():
         async with api.Session(endpoint_url="http://127.0.0.1:9") as session:
             await session.invoke_detached("delete-scratch", store="s3://bucket/scratch")
 
-    with pytest.raises(RuntimeError, match="could not reach Lambda"):
+    with pytest.raises(RuntimeError, match="invoking Lambda failed"):
         asyncio.run(invoke_nowhere())
 
 

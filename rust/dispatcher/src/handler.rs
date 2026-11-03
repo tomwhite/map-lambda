@@ -8,46 +8,31 @@ use crate::dispatch::{dispatch, ReportCallback};
 use crate::lambda_clients;
 use crate::protocol::{Completed, Frame, Request};
 use lambda_runtime::streaming::{channel, Body, Response as StreamResponse, Sender};
-use lambda_runtime::{Error, LambdaEvent};
-
-/// Send one frame as a JSON line.
-///
-/// Fails if the runtime stops reading the body, which a client going away
-/// does not cause; the caller then aborts the body rather than leave a
-/// stream that looks complete.
-async fn send(tx: &mut Sender, frame: &Frame) -> Result<(), Error> {
-    let mut line = serde_json::to_vec(frame)?;
-    line.push(b'\n');
-    tx.send_data(line.into())
-        .await
-        .map_err(|e| Error::from(e.to_string()))
-}
+use lambda_runtime::{tracing, Error, LambdaEvent};
 
 /// A partition's reports, as frames on the response body.
 struct FrameWriter<'a>(&'a mut Sender);
 
-impl ReportCallback for FrameWriter<'_> {
-    async fn completed(&mut self, completed: Completed) -> Result<(), Error> {
-        send(self.0, &Frame::Completed(completed)).await
+impl FrameWriter<'_> {
+    /// Send one frame as a JSON line.
+    ///
+    /// Fails if the runtime stops reading the body, which a client going away
+    /// does not cause; the caller then aborts the body rather than leave a
+    /// stream that looks complete.
+    async fn send(&mut self, frame: &Frame) -> Result<(), Error> {
+        let mut line = serde_json::to_vec(frame)?;
+        line.push(b'\n');
+        self.0
+            .send_data(line.into())
+            .await
+            .map_err(|e| Error::from(e.to_string()))
     }
 }
 
-/// Dispatch the partition and send its summary as the last frame.
-async fn run_partition(event: LambdaEvent<Request>, tx: &mut Sender) -> Result<(), Error> {
-    let req_id = event.context.request_id;
-    let (lambda_clients, cold) =
-        lambda_clients::for_request(event.payload.endpoint_url.as_deref()).await;
-
-    let stats = dispatch(
-        event.payload,
-        req_id,
-        &lambda_clients,
-        cold,
-        &mut FrameWriter(tx),
-    )
-    .await?;
-
-    send(tx, &Frame::Summary(Box::new(stats))).await
+impl ReportCallback for FrameWriter<'_> {
+    async fn completed(&mut self, completed: Completed) -> Result<(), Error> {
+        self.send(&Frame::Completed(completed)).await
+    }
 }
 
 /// Returns as soon as the stream exists, with the partition running behind
@@ -62,11 +47,27 @@ pub(crate) async fn function_handler(
 ) -> Result<StreamResponse<Body>, Error> {
     let (mut tx, rx) = channel();
     tokio::spawn(async move {
-        if run_partition(event, &mut tx).await.is_err() {
-            // A truncated stream says why it failed; a well-formed one
-            // lacking a summary frame would not.
+        if let Err(error) = run_partition(event, &mut FrameWriter(&mut tx)).await {
+            // The client sees only that the stream ended early, not why.
+            tracing::error!(%error, "partition failed");
+            // A truncated stream tells the client it failed; a well-formed
+            // one lacking a summary frame would not.
             tx.abort();
         }
     });
     Ok(StreamResponse::from(rx))
+}
+
+/// Dispatch the partition and send its summary as the last frame.
+async fn run_partition(
+    event: LambdaEvent<Request>,
+    writer: &mut FrameWriter<'_>,
+) -> Result<(), Error> {
+    let req_id = event.context.request_id;
+    let (lambda_clients, cold) =
+        lambda_clients::for_request(event.payload.endpoint_url.as_deref()).await;
+
+    let stats = dispatch(event.payload, req_id, &lambda_clients, cold, writer).await?;
+
+    writer.send(&Frame::Summary(Box::new(stats))).await
 }

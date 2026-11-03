@@ -15,22 +15,25 @@
 //! let session = Session::connect(None).await.with_settings(settings);
 //!
 //! let inputs = (0..1_000).map(|i| json!(i)).collect();
-//! let mut batches = session.map_unordered("echo", inputs, "i", Map::new())?;
-//! while let Some(batch) = batches.next().await {
-//!     for (index, output) in batch?.outputs {
-//!         println!("input {index} returned {output}");
-//!     }
+//! let mut outputs = session.map_unordered("echo", inputs, "i", Map::new())?.outputs();
+//! while let Some(output) = outputs.next().await {
+//!     let (index, output) = output?;
+//!     println!("input {index} returned {output}");
 //! }
 //! # Ok(())
 //! # }
 //! ```
 #![warn(missing_docs)]
 
+// A call flows `session` -> `call` -> `plan`, then `invoker` -> `frames`
+// once per partition, and comes back from `call` as `Batches`:
+//
+// - `session` - the settings calls run with, and the calls themselves.
+// - `call` - one call: planned, invoked, its frames merged and checked.
 // - `plan` - how a call is divided, decided before anything is invoked.
 // - `invoker` - how a request reaches a dispatcher, behind a trait.
 // - `frames` - a response body back into frames.
-// - `call` - one call.
-// - `session` - the settings calls run with, and the calls themselves.
+// - `error` - what can go wrong, for every step above.
 // - `testing` - a stand-in for Lambda.
 
 mod call;

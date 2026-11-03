@@ -62,6 +62,7 @@ impl LambdaInvoker {
         let timeouts = TimeoutConfig::builder().read_timeout(DISPATCHER_READ_TIMEOUT);
         let config = match endpoint_url {
             None => loader.timeout_config(timeouts.build()),
+            // Keep in sync with the dispatcher's `local_client`.
             Some(url) => loader
                 .region(Region::new("us-east-1"))
                 .credentials_provider(Credentials::new("test", "test", None, None, "local"))
@@ -83,7 +84,7 @@ impl LambdaInvoker {
             .payload(Blob::new(payload))
             .send()
             .await
-            .map_err(|e| Error::Transport(error_chain(&e)))?;
+            .map_err(|e| Error::InvokeFailed(error_chain(&e)))?;
 
         let chunks = futures::stream::unfold(Some(invoked.event_stream), |state| async move {
             let mut events = state?;
@@ -98,14 +99,16 @@ impl LambdaInvoker {
                 Ok(Some(Event::InvokeComplete(complete))) => match complete.error_code {
                     Some(code) => {
                         let detail = complete.error_details.unwrap_or_default();
-                        let failed =
-                            Error::FailedMidStream(format!("{code} {detail}").trim().to_string());
-                        Some((Err(failed), None))
+                        let failed = format!("{code} {detail}").trim().to_string();
+                        Some((
+                            Err(Error::DispatcherFailed(format!("{failed} (mid-stream)"))),
+                            None,
+                        ))
                     }
                     None => Some((Ok(Vec::new()), Some(events))),
                 },
                 Ok(Some(_)) => Some((Ok(Vec::new()), Some(events))),
-                Err(e) => Some((Err(Error::Transport(error_chain(&e))), None)),
+                Err(e) => Some((Err(Error::InvokeFailed(error_chain(&e))), None)),
             }
         });
         Ok(Box::pin(chunks))
@@ -123,7 +126,7 @@ impl LambdaInvoker {
             .payload(Blob::new(payload))
             .send()
             .await
-            .map_err(|e| Error::Transport(error_chain(&e)))?;
+            .map_err(|e| Error::InvokeFailed(error_chain(&e)))?;
         if let Some(failed) = invoked.function_error {
             return Err(Error::DispatcherFailed(failed));
         }
@@ -158,7 +161,7 @@ impl Invoker for LambdaInvoker {
                 .payload(Blob::new(payload))
                 .send()
                 .await
-                .map_err(|e| Error::Transport(error_chain(&e)))?;
+                .map_err(|e| Error::InvokeFailed(error_chain(&e)))?;
             Ok(())
         })
     }

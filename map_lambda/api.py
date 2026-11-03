@@ -48,7 +48,7 @@ class Session:
 
     retries: int = 2
     """
-    How many times to retry on a transport failure (per invocation). The
+    How many times to retry a failed request to Lambda (per invocation). The
     default is 2, which is 3 attempts in total. A worker that ran and raised
     is never retried: the same payload gets the same output.
     """
@@ -68,7 +68,6 @@ class Session:
     * `req_id` - AWS's id for the dispatcher's own invocation, for finding
       its run in CloudWatch
     * `dispatched` - invocations it sent, which is its partition's size
-    * `succeeded` - invocations that returned
     * `retried` - attempts beyond the first, across the partition
     * `retry_wait_ms` - summed wait before those attempts
     * `cold` - whether the execution environment was cold, or `None` for a

@@ -11,15 +11,32 @@ use tokio::sync::OnceCell;
 
 /// One set per execution environment, so a warm environment reuses
 /// their connection pools.
-///
-/// The SDK's retries are disabled and re-implemented in
-/// `invoke_with_retries`, so that every re-send is counted.
 static CLIENTS: OnceCell<Vec<LambdaClient>> = OnceCell::const_new();
+
+/// The clients one request dispatches over, and whether the shared set
+/// had to be built - which is what `cold` means in the stats.
+///
+/// Borrowed from `CLIENTS` for a deployed run, so a warm environment
+/// reuses its connection pools, and owned for a local one, which gets a
+/// throwaway.
+pub(crate) async fn for_request(
+    endpoint_url: Option<&str>,
+) -> (Cow<'static, [LambdaClient]>, Option<bool>) {
+    match endpoint_url {
+        Some(url) => (Cow::Owned(vec![local_client(url).await]), None),
+        None => {
+            let cold = CLIENTS.get().is_none();
+            (Cow::Borrowed(shared().await), Some(cold))
+        }
+    }
+}
 
 async fn shared() -> &'static [LambdaClient] {
     CLIENTS
         .get_or_init(|| async {
             let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                // Re-implemented in `invoke_with_retries`, so that every
+                // re-send is counted.
                 .retry_config(RetryConfig::disabled())
                 .load()
                 .await;
@@ -48,6 +65,7 @@ async fn shared() -> &'static [LambdaClient] {
 /// The emulator does not check credentials, but the SDK will not sign
 /// without them.
 async fn local_client(endpoint_url: &str) -> LambdaClient {
+    // Keep in sync with the client's local config in `LambdaInvoker::connect`.
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(Region::new("us-east-1"))
         .credentials_provider(Credentials::new("test", "test", None, None, "local"))
@@ -56,22 +74,4 @@ async fn local_client(endpoint_url: &str) -> LambdaClient {
         .load()
         .await;
     LambdaClient::new(&config)
-}
-
-/// The clients one request dispatches over, and whether the shared set
-/// had to be built - which is what `cold` means in the stats.
-///
-/// Borrowed from `CLIENTS` for a deployed run, so a warm environment
-/// reuses its connection pools, and owned for a local one, which gets a
-/// throwaway.
-pub(crate) async fn for_request(
-    endpoint_url: Option<&str>,
-) -> (Cow<'static, [LambdaClient]>, Option<bool>) {
-    match endpoint_url {
-        Some(url) => (Cow::Owned(vec![local_client(url).await]), None),
-        None => {
-            let cold = CLIENTS.get().is_none();
-            (Cow::Borrowed(shared().await), Some(cold))
-        }
-    }
 }

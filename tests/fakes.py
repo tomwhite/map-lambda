@@ -47,13 +47,9 @@ def completed(
     }
 
 
-def dispatcher_summary(succeeded: int, **overrides: Any) -> dict[str, Any]:
+def dispatcher_summary(dispatched: int, **overrides: Any) -> dict[str, Any]:
     """
-    One dispatcher's summary frame.
-
-    `succeeded` sets `dispatched` too, because the ordinary case is a
-    partition that did all of its work; `**overrides` is how a test says
-    otherwise, e.g. `dispatched=5` for a short one.
+    One dispatcher's summary frame, for a partition of `dispatched` inputs.
 
     Outputs and records are not here: they ride on the `Completed`
     frames, and a summary frame repeating them would be a second copy of
@@ -61,8 +57,7 @@ def dispatcher_summary(succeeded: int, **overrides: Any) -> dict[str, Any]:
     """
     return {
         "req_id": "dispatcher-0",
-        "dispatched": succeeded,
-        "succeeded": succeeded,
+        "dispatched": dispatched,
         "retried": 0,
         "retry_wait_ms": 0.0,
         "cold": False,
@@ -77,7 +72,7 @@ class RecordingInvoker(_native.Stub):
     A Lambda client that records the requests it was sent and replays
     canned responses. Use it to assert **what went on the wire**, and to
     put a dispatcher into a state a real one is hard to provoke, like a
-    short partition or a transport error.
+    short partition or a failed invoke.
 
     Each canned response is either a summary dict (`dispatcher_summary`),
     streamed as the frames accounting for its work and then the summary,
@@ -92,7 +87,7 @@ class RecordingInvoker(_native.Stub):
                 frames = canned
             else:
                 frames = [
-                    completed(succeeded=canned["succeeded"]),
+                    completed(succeeded=canned["dispatched"]),
                     {"Summary": canned},
                 ]
             body = self.respond()

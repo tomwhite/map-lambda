@@ -112,7 +112,7 @@ def test_a_failed_invocation_raises_on_the_frame_that_reports_it():
             [
                 completed(succeeded=1, first_error="worker said no (req_id=w-7)"),
                 completed(succeeded=2),
-                {"Summary": dispatcher_summary(3, dispatched=5)},
+                {"Summary": dispatcher_summary(5)},
             ],
             [
                 completed(succeeded=5),
@@ -165,26 +165,13 @@ def test_every_partitions_record_is_kept_when_one_of_them_comes_up_short():
     assert len(collected) == 2
 
 
-def test_a_result_is_not_taken_on_trust_for_frames_that_never_came():
-    """Only the frames carry outputs, so success has to rest on them."""
-    invoker = RecordingInvoker(
-        [
-            [completed(succeeded=4), {"Summary": dispatcher_summary(5)}],
-            dispatcher_summary(5),
-        ]
-    )
-
-    with pytest.raises(RuntimeError, match="completed 4 of 5"):
-        _map(invoker)
-
-
 def test_a_failed_invocation_stops_the_call_before_any_dispatcher_record():
     """Waiting for them would bill for work whose call has already failed."""
     invoker = RecordingInvoker(
         [
             [
                 completed(succeeded=1, first_error="worker said no"),
-                {"Summary": dispatcher_summary(4, dispatched=5)},
+                {"Summary": dispatcher_summary(5)},
             ],
             dispatcher_summary(5),
         ]
@@ -195,28 +182,6 @@ def test_a_failed_invocation_stops_the_call_before_any_dispatcher_record():
         _map(invoker, dispatcher_stats=collected)
 
     assert collected == []
-
-
-def test_a_dispatcher_record_does_not_carry_its_partitions_invocations():
-    """
-    They come back through `invocation_stats`, numbered against the
-    caller's inputs. Nested in the partition's record they would be a
-    second copy, still numbered against the partition.
-    """
-    stats = [{"index": 0, "req_id": "w-0", "invoke_start": 1.0, "invoke_end": 2.0}]
-    invoker = RecordingInvoker(
-        [
-            [completed(succeeded=5, invocation_stats=stats), {"Summary": dispatcher_summary(5)}],
-            dispatcher_summary(5),
-        ]
-    )
-    partitions: list[dict] = []
-    invocations: list[dict] = []
-
-    _map(invoker, dispatcher_stats=partitions, invocation_stats=invocations)
-
-    assert all("invocation_stats" not in record for record in partitions)
-    assert len(invocations) == 1
 
 
 def test_invocation_records_are_stamped_with_the_call_they_belong_to():

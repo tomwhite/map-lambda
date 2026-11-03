@@ -11,12 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
-/// Lambda's SETTINGS_MAX_CONCURRENT_STREAMS: the hard limit, past which
-/// requests on one HTTP/2 connection queue.
-pub const MAX_STREAMS_PER_CONNECTION: usize = 128;
-
 /// How many invocations a dispatcher puts through one HTTP/2 connection:
-/// `MAX_STREAMS_PER_CONNECTION` less headroom.
+/// headroom below Lambda's SETTINGS_MAX_CONCURRENT_STREAMS of 128, past
+/// which requests on the connection queue.
 pub const STREAMS_PER_CONNECTION: usize = 100;
 
 /// The most invocations one dispatcher will carry at once.
@@ -29,17 +26,6 @@ pub const MAX_IN_FLIGHT_LOCAL: usize = STREAMS_PER_CONNECTION;
 /// Clients a dispatcher builds at cold start, enough to cover
 /// `MAX_IN_FLIGHT`.
 pub const MAX_LAMBDA_CLIENTS: usize = MAX_IN_FLIGHT.div_ceil(STREAMS_PER_CONNECTION);
-
-/// Lambda's hard cap on a synchronous request payload, which the whole
-/// `Request` has to fit: inputs, one copy of `constant_args`, and framing.
-pub const MAX_REQUEST_BYTES: usize = 6 * 1024 * 1024;
-
-/// How many connections `max_in_flight` invocations need.
-pub fn connections_for(max_in_flight: usize) -> usize {
-    max_in_flight
-        .div_ceil(STREAMS_PER_CONNECTION)
-        .clamp(1, MAX_LAMBDA_CLIENTS)
-}
 
 /// What the client sends: a function to call, a payload to call it
 /// with, and the work to spread across the calls.
@@ -62,7 +48,7 @@ pub struct Request {
     /// Where to send the worker invocations, for a local run against
     /// `cargo lambda watch`. `None` means real Lambda.
     pub endpoint_url: Option<String>,
-    /// Extra attempts after a *transport* failure, per invocation.
+    /// Extra attempts after a failed invoke, per invocation.
     pub retries: usize,
     /// Whether to put one record per invocation on the frames.
     pub return_stats: bool,
@@ -70,31 +56,16 @@ pub struct Request {
     pub return_outputs: bool,
 }
 
-/// Statistics for a single worker invocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InvocationStats {
-    /// Where this invocation's input sat in the partition, counting from 0.
-    pub index: usize,
-    /// The worker invocation's AWS request ID
-    pub req_id: String,
-    /// Epoch seconds, to match Python's `time.time()`.
-    pub invoke_start: f64,
-    pub invoke_end: f64,
-}
-
-/// One worker's output.
-///
-/// `value` is the worker's whole body, verbatim. Never null: a worker
-/// that returned nothing gets no `Output` at all.
+/// What goes over the wire, one JSON object per line: completed frames
+/// as the partition runs, followed by exactly one summary.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Output {
-    /// Where the input this came from sat in the partition, as `InvocationStats::index`.
-    pub index: usize,
-    /// As the worker wrote it: checked to be JSON, but never parsed into
-    /// a tree, which takes several times the memory of the text.
-    pub value: Box<RawValue>,
+pub enum Frame {
+    /// What finished since the last frame. The first is sent empty, before
+    /// any work starts; after that, only a reporting tick with something
+    /// new sends one.
+    Completed(Completed),
+    /// The partition's stats, sent once, last.
+    Summary(Box<DispatcherStats>),
 }
 
 /// What finished since the last frame.
@@ -123,14 +94,43 @@ impl Completed {
     }
 }
 
+/// One worker's output.
+///
+/// `value` is the worker's whole body, verbatim. Never null: a worker
+/// that returned nothing gets no `Output` at all.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Output {
+    /// Where the input this came from sat in the partition, as `InvocationStats::index`.
+    pub index: usize,
+    /// As the worker wrote it: checked to be JSON, but never parsed into
+    /// a tree, which takes several times the memory of the text.
+    pub value: Box<RawValue>,
+}
+
+/// Statistics for a single worker invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationStats {
+    /// Where this invocation's input sat in the partition, counting from 0.
+    pub index: usize,
+    /// The worker invocation's AWS request ID
+    pub req_id: String,
+    /// Epoch seconds, to match Python's `time.time()`.
+    pub invoke_start: f64,
+    pub invoke_end: f64,
+}
+
+/// What one dispatcher reports about its partition, in the summary frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatcherStats {
     /// This dispatcher's own AWS request id, so its run can be found in
     /// CloudWatch alongside the invocations it dispatched.
     pub req_id: String,
+    /// The partition's inputs. After a failed invocation the dispatcher
+    /// starts no more, so fewer may have run.
     pub dispatched: usize,
-    pub succeeded: usize,
     /// Attempts beyond the first, across all invocations.
     pub retried: usize,
     /// Summed wait before those attempts.
@@ -141,30 +141,20 @@ pub struct DispatcherStats {
     pub cold: Option<bool>,
     /// HTTP/2 connections the invocations were spread over.
     pub connections: usize,
+    /// From starting the first invocation to sending the last `Completed`
+    /// frame. A cold start's client building comes before it.
     pub elapsed_ms: f64,
-}
-
-/// What goes over the wire, one JSON object per line: a completed frame
-/// per reporting tick, followed by exactly one summary.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum Frame {
-    Completed(Completed),
-    Summary(Box<DispatcherStats>),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        connections_for, Completed, DispatcherStats, Frame, InvocationStats, Output, MAX_IN_FLIGHT,
-        MAX_LAMBDA_CLIENTS, STREAMS_PER_CONNECTION,
-    };
+    use super::{Completed, DispatcherStats, Frame, InvocationStats, Output};
     use serde_json::json;
 
     fn a_summary() -> DispatcherStats {
         DispatcherStats {
             req_id: "dispatcher-0".to_string(),
             dispatched: 3,
-            succeeded: 3,
             retried: 1,
             retry_wait_ms: 2.5,
             cold: None,
@@ -216,31 +206,5 @@ mod tests {
             value,
             json!({"Completed": {"succeeded": 0, "outputs": [], "invocation_stats": [], "first_error": null}})
         );
-    }
-
-    #[test]
-    fn connections_cover_the_concurrency_asked_for() {
-        // Too few connections does not error; the run is just slower.
-        for max_in_flight in [1usize, 99, 100, 101, 128, 900, MAX_IN_FLIGHT] {
-            let n = connections_for(max_in_flight);
-            assert!(
-                n * STREAMS_PER_CONNECTION >= max_in_flight,
-                "{max_in_flight} in flight over {n} connection(s)"
-            );
-            assert!((1..=MAX_LAMBDA_CLIENTS).contains(&n));
-        }
-    }
-
-    #[test]
-    fn the_clients_built_cover_the_in_flight_limit() {
-        // `div_ceil` guarantees the arithmetic; this is the clamp.
-        assert_eq!(connections_for(MAX_IN_FLIGHT), MAX_LAMBDA_CLIENTS);
-    }
-
-    #[test]
-    fn one_connection_is_enough_below_the_stream_limit() {
-        assert_eq!(connections_for(1), 1);
-        assert_eq!(connections_for(STREAMS_PER_CONNECTION), 1);
-        assert_eq!(connections_for(STREAMS_PER_CONNECTION + 1), 2);
     }
 }

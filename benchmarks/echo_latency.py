@@ -29,10 +29,6 @@ from map_lambda import stats as stats_module
 
 ECHO_FUNCTION = "echo"
 
-# Lambda's only writable directory, where `echo` keeps its per-input
-# invocation counts.
-ECHO_PATH = "/tmp/map-lambda-echo"
-
 
 async def run(args: argparse.Namespace) -> tuple[float, list[dict], list[Any]]:
     """One round of invocations, returning the wall clock, the records and the outputs."""
@@ -52,7 +48,7 @@ async def run(args: argparse.Namespace) -> tuple[float, list[dict], list[Any]]:
                 input_key="i",
                 # 0.0 rather than echo's default 10ms, so the figures are
                 # map-lambda's overhead rather than a sleep it was told to do
-                constant_args={"path": ECHO_PATH, "default_sleep": 0.0},
+                constant_args={"default_sleep": 0.0},
             )
         ]
         return time.monotonic() - started, invocations, outputs

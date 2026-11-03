@@ -7,31 +7,9 @@
 use crate::Error;
 use map_lambda_protocol::{MAX_IN_FLIGHT, MAX_IN_FLIGHT_LOCAL};
 
-fn carried(local: bool) -> usize {
-    if local {
-        MAX_IN_FLIGHT_LOCAL
-    } else {
-        MAX_IN_FLIGHT
-    }
-}
-
 /// The fewest dispatchers that can hold `concurrency` in flight.
 pub(crate) fn dispatchers_for(concurrency: usize, local: bool) -> usize {
     concurrency.div_ceil(carried(local)).max(1)
-}
-
-/// The inputs, dealt round-robin into `count` partitions: partition `k`
-/// holds `inputs[k::count]`.
-///
-/// Strided because inputs often get cheaper towards the end (a grid
-/// enumerated in C order puts its edge cases last), and contiguous
-/// blocks would hand the final partition a lighter slice.
-pub(crate) fn partitions<T>(inputs: Vec<T>, count: usize) -> Vec<Vec<T>> {
-    let mut partitions: Vec<Vec<T>> = (0..count).map(|_| Vec::new()).collect();
-    for (index, input) in inputs.into_iter().enumerate() {
-        partitions[index % count].push(input);
-    }
-    partitions
 }
 
 /// `concurrency` in flight, split as evenly as possible across `count`
@@ -67,6 +45,28 @@ pub(crate) fn shares(concurrency: usize, count: usize, local: bool) -> Result<Ve
     Ok((0..count).map(|i| base + usize::from(i < extra)).collect())
 }
 
+/// The inputs, dealt round-robin into `count` partitions: partition `k`
+/// holds `inputs[k::count]`.
+///
+/// Strided because inputs often get cheaper towards the end (a grid
+/// enumerated in C order puts its edge cases last), and contiguous
+/// blocks would hand the final partition a lighter slice.
+pub(crate) fn partitions<T>(inputs: Vec<T>, count: usize) -> Vec<Vec<T>> {
+    let mut partitions: Vec<Vec<T>> = (0..count).map(|_| Vec::new()).collect();
+    for (index, input) in inputs.into_iter().enumerate() {
+        partitions[index % count].push(input);
+    }
+    partitions
+}
+
+fn carried(local: bool) -> usize {
+    if local {
+        MAX_IN_FLIGHT_LOCAL
+    } else {
+        MAX_IN_FLIGHT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{dispatchers_for, partitions, shares};
@@ -81,18 +81,6 @@ mod tests {
         assert_eq!(dispatchers_for(5000, false), 4);
         // a local dispatcher carries one connection's worth, so it needs more
         assert_eq!(dispatchers_for(500, true), 5);
-    }
-
-    #[test]
-    fn partitions_are_strided_and_between_them_cover_every_input() {
-        let partitions = partitions((0..10).collect(), 3);
-
-        assert_eq!(partitions, [vec![0, 3, 6, 9], vec![1, 4, 7], vec![2, 5, 8]]);
-    }
-
-    #[test]
-    fn more_dispatchers_than_inputs_leaves_some_with_nothing() {
-        assert_eq!(partitions(vec![0, 1], 5)[2], Vec::<i32>::new());
     }
 
     #[test]
@@ -152,5 +140,17 @@ mod tests {
             .contains("more than the 100 a local dispatcher can carry"));
         // the same share is fine against real Lambda
         assert!(shares(MAX_IN_FLIGHT_LOCAL + 1, 1, false).is_ok());
+    }
+
+    #[test]
+    fn partitions_are_strided_and_between_them_cover_every_input() {
+        let partitions = partitions((0..10).collect(), 3);
+
+        assert_eq!(partitions, [vec![0, 3, 6, 9], vec![1, 4, 7], vec![2, 5, 8]]);
+    }
+
+    #[test]
+    fn more_dispatchers_than_inputs_leaves_some_with_nothing() {
+        assert_eq!(partitions(vec![0, 1], 5)[2], Vec::<i32>::new());
     }
 }

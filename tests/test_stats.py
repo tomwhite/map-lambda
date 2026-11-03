@@ -141,13 +141,13 @@ def _partition(call=0, connections=1, **fields):
 def test_summarize_reports_the_connections_a_partition_had():
     summary = summarize_dispatchers([_partition(connections=9)])
 
-    assert "9 HTTP/2 connection(s) per dispatcher, ~1,152 in flight available" in summary
+    assert "9 HTTP/2 connection(s) per dispatcher, ~900 in flight available" in summary
 
 
 def test_the_streams_available_are_the_calls_not_one_dispatchers():
     summary = summarize_dispatchers([_partition(connections=2) for _ in range(8)])
 
-    assert "~2,048 in flight available" in summary
+    assert "~1,600 in flight available" in summary
 
 
 def test_connections_are_a_range_when_the_dispatchers_differ():
@@ -155,7 +155,7 @@ def test_connections_are_a_range_when_the_dispatchers_differ():
     summary = summarize_dispatchers([_partition(connections=2), _partition(connections=1)])
 
     assert "1-2 HTTP/2 connection(s) per dispatcher" in summary
-    assert "~384 in flight available" in summary
+    assert "~300 in flight available" in summary
 
 
 def test_the_widest_call_is_what_the_connections_have_to_cover():
@@ -164,7 +164,7 @@ def test_the_widest_call_is_what_the_connections_have_to_cover():
         [_partition(call=0, connections=1), _partition(call=1, connections=4)]
     )
 
-    assert "~512 in flight available" in summary
+    assert "~400 in flight available" in summary
 
 
 def test_summarize_takes_the_worst_spread_across_calls():
