@@ -45,8 +45,8 @@ pub enum Error {
         need: usize,
     },
 
-    #[error("an invocation failed, so the call cannot succeed: {0}")]
-    InvocationFailed(String),
+    #[error("a partition failed, so the call cannot succeed: {0}")]
+    PartitionFailed(String),
 
     #[error(
         "dispatcher {req_id} completed {succeeded} of {expected} invocation(s) in its partition \
@@ -57,6 +57,14 @@ pub enum Error {
         succeeded: usize,
         expected: usize,
     },
+
+    #[error("input {index} was combined into two states, so merging them would count it twice")]
+    CoveredTwice { index: usize },
+
+    #[error(
+        "{missing} input(s) succeeded but reached no state, so the result would leave them out"
+    )]
+    Uncovered { missing: usize },
 
     #[error(
         "dispatcher stream ended with no summary frame - it stopped partway through its \

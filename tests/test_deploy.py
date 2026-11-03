@@ -106,9 +106,8 @@ def test_the_deploy_names_functions_as_a_session_calls_them():
         session.function_name("work", memory=1024),
         session.function_name("work", memory=3538),
     ]
-    assert project.dispatcher.deployed("proj") == [
-        (session.function_name(map_lambda.DISPATCHER), 3538)
-    ]
+    (dispatcher,) = project.dispatchers
+    assert dispatcher.deployed("proj") == [(session.function_name(map_lambda.DISPATCHER), 3538)]
 
 
 def test_a_function_defaults_its_package_and_binary_to_its_name():
@@ -118,10 +117,57 @@ def test_a_function_defaults_its_package_and_binary_to_its_name():
 
 
 def test_the_dispatcher_defaults_to_a_crate_called_dispatcher():
-    dispatcher = _spec().dispatcher
+    (dispatcher,) = _spec().dispatchers
 
     assert (dispatcher.package, dispatcher.binary) == ("dispatcher", "dispatcher")
     assert dispatcher.memory == 3538
+
+
+def _with_combiners(**combiners: Any) -> spec.Spec:
+    return spec.parse(
+        {
+            "project": "proj",
+            "dispatcher": {"memory": 2048, "timeout": 300},
+            "functions": {"work": {"memory": 1024}},
+            "combiners": combiners,
+        },
+        base=Path(),
+    )
+
+
+def test_a_combiner_deploys_a_dispatcher_named_as_a_combining_call_invokes_it():
+    (combiner,) = _with_combiners(sum={}).combiners
+
+    assert combiner.deployed("proj") == [("proj-dispatcher-sum", 2048)]
+    assert (combiner.package, combiner.binary, combiner.timeout) == (
+        "dispatcher-sum",
+        "dispatcher-sum",
+        300,
+    )
+
+
+def test_a_spec_with_combiners_deploys_the_regular_dispatcher_too():
+    raw = {"project": "proj", "functions": {"work": {"memory": 1024}}, "combiners": {"sum": {}}}
+    functions = {
+        r["Properties"]["FunctionName"]: r["Properties"]["MemorySize"]
+        for r in template.template(spec.parse(raw, base=Path()), [])["Resources"].values()
+        if r["Type"] == "AWS::Lambda::Function"
+    }
+
+    assert functions == {"proj-dispatcher": 3538, "proj-dispatcher-sum": 3538, "proj-work": 1024}
+
+
+def test_a_combiner_s_package_binary_memory_and_timeout_can_be_set():
+    table = {"package": "my-sum", "binary": "sum", "memory": 1024, "timeout": 60}
+    (combiner,) = _with_combiners(sum=table).combiners
+
+    assert (combiner.package, combiner.binary, combiner.memory, combiner.timeout) == (
+        "my-sum",
+        "sum",
+        1024,
+        60,
+    )
+    assert _with_combiners(sum=table).binaries["sum"] == "my-sum"
 
 
 def test_a_list_of_sizes_adds_a_suffixed_name_for_each_to_the_plain_default():
@@ -133,6 +179,9 @@ def test_a_list_of_sizes_adds_a_suffixed_name_for_each_to_the_plain_default():
         ("proj-several-1024", 1024),
         ("proj-several-2048", 2048),
     ]
+
+
+W = {"w": {"memory": 512}}
 
 
 @pytest.mark.parametrize(
@@ -158,6 +207,22 @@ def test_a_list_of_sizes_adds_a_suffixed_name_for_each_to_the_plain_default():
             "{bucket}",
         ),
         ({"project": "p" * 60, "functions": {"w": {"memory": 512}}}, "64 characters"),
+        ({"project": "p", "dispatcher": {"memory": [512, 1024]}, "functions": W}, "one memory"),
+        (
+            {"project": "p", "functions": W, "combiners": {"s": {"memory": [512, 1024]}}},
+            "combiners.s: a dispatcher takes one memory size",
+        ),
+        (
+            {
+                "project": "p",
+                "functions": W,
+                "combiners": {"s": {"bucket_access": [{"action": "s3:*", "resource": "{bucket}"}]}},
+            },
+            "can't have bucket_access",
+        ),
+        ({"project": "p", "functions": W, "combiners": {"S": {}}}, "combiners.S: names"),
+        ({"project": "p", "functions": W, "combiners": {"s": {"memroy": 1}}}, "unknown memroy"),
+        ({"project": "p" * 50, "functions": W, "combiners": {"s" * 4: {}}}, "64 characters"),
     ],
 )
 def test_a_spec_that_cant_be_deployed_says_what_to_change(raw, message):
@@ -199,6 +264,32 @@ def test_the_dispatcher_may_invoke_every_worker_and_nothing_else():
         {"Fn::GetAtt": [name, "Arn"]}
         for name in ("AFunction", "BFunction", "B512Function", "B1024Function")
     ]
+
+
+def test_a_combiner_is_deployed_with_the_dispatcher_s_role_and_its_own_code():
+    stack = template.template(_with_combiners(sum={}), [])
+    resources = stack["Resources"]
+    function = resources["DispatcherSumFunction"]["Properties"]
+
+    assert function["FunctionName"] == "proj-dispatcher-sum"
+    assert (function["MemorySize"], function["Timeout"]) == (2048, 300)
+    assert function["Role"] == {"Fn::GetAtt": ["DispatcherRole", "Arn"]}
+    assert function["Code"]["S3Key"] == {"Ref": "DispatcherSumCodeKey"}
+    assert resources["DispatcherSumLogGroup"]["Properties"]["LogGroupName"] == (
+        "/aws/lambda/proj-dispatcher-sum"
+    )
+    assert "DispatcherSumCodeKey" in stack["Parameters"]
+
+
+def test_a_worker_with_a_combining_dispatcher_s_name_is_refused():
+    raw = {
+        "project": "proj",
+        "functions": {"dispatcher-sum": {"memory": 512}},
+        "combiners": {"sum": {}},
+    }
+
+    with pytest.raises(SpecError, match="clashes"):
+        template.template(spec.parse(raw, base=Path()), [])
 
 
 def test_bucket_access_is_granted_on_each_allowed_bucket_and_only_then():

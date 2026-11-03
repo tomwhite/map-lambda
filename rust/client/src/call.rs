@@ -7,8 +7,8 @@ use crate::plan::{dispatchers_for, partitions, shares};
 use crate::Error;
 use async_stream::try_stream;
 use futures::stream::{BoxStream, Stream, StreamExt};
+use map_lambda_protocol::{Combine, Completed, Frame, Request};
 pub use map_lambda_protocol::{DispatcherStats, InvocationStats};
-use map_lambda_protocol::{Frame, Request};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `Request` has to fit: inputs, one copy of `constant_args`, and framing.
 pub(crate) const MAX_REQUEST_BYTES: usize = 6 * 1024 * 1024;
 
-/// What one `map_unordered` or `for_each` is asked to do.
+/// What one `map_unordered`, `for_each` or `map_combine` is asked to do.
 #[derive(Debug, Clone)]
 pub(crate) struct Call {
     /// The name the dispatcher is deployed under.
@@ -38,6 +38,7 @@ pub(crate) struct Call {
     /// A local `cargo lambda watch` for the dispatchers to invoke workers
     /// on; `None` for real Lambda.
     pub(crate) endpoint_url: Option<String>,
+    /// Ignored by a combining call, which always gets its states back.
     pub(crate) return_outputs: bool,
     pub(crate) return_stats: bool,
     /// Which call of its session this is, stamped on every record.
@@ -99,7 +100,7 @@ pub struct Batch {
     pub invocation_stats: Vec<Record<InvocationStats>>,
     /// One per dispatcher, all in the last batch: they arrive before any
     /// is checked, so a call that fails a check still says what each
-    /// dispatcher did. A failed invocation stops the call before they
+    /// dispatcher did. A failed partition stops the call before they
     /// arrive, so it has none.
     pub dispatcher_stats: Vec<Record<DispatcherStats>>,
 }
@@ -126,16 +127,190 @@ pub struct Record<T> {
     pub call_start: f64,
 }
 
-/// Start `inputs` through `call.dispatchers` dispatchers.
+/// What a call's dispatchers send, merged as it arrives and numbered against
+/// the caller's inputs, for a call's batches to be made from.
+pub(crate) enum Event {
+    /// A `Completed` frame. One carrying a failure ends the stream instead.
+    Completed {
+        succeeded: usize,
+        outputs: Vec<(usize, Box<RawValue>)>,
+        /// A combiner's state, and the indexes it covers.
+        states: Vec<(Vec<usize>, Option<Box<RawValue>>)>,
+        invocation_stats: Vec<Record<InvocationStats>>,
+    },
+    /// Every dispatcher's summary, once all are in. A partition that falls
+    /// short ends the stream after it.
+    Summaries(Vec<Record<DispatcherStats>>),
+}
+
+/// What a started call reads its frames against.
+struct Started {
+    /// How many dispatchers.
+    count: usize,
+    /// Inputs per partition.
+    expected: Vec<usize>,
+    number: usize,
+    call_start: f64,
+}
+
+impl Started {
+    /// Partition `k` holds `inputs[k::count]`.
+    fn place(&self, partition: usize, index: usize) -> usize {
+        partition + index * self.count
+    }
+
+    fn record<T>(&self, record: T) -> Record<T> {
+        Record {
+            record,
+            call: self.number,
+            call_start: self.call_start,
+        }
+    }
+
+    /// A `Completed` frame's records, numbered against the caller's inputs.
+    /// Its failure, if it carries one, ends the call: retries are already
+    /// spent, or a combiner failed, so the call cannot succeed and the
+    /// frame's outputs are moot.
+    fn progress(
+        &self,
+        partition: usize,
+        first_error: Option<String>,
+        invocation_stats: Vec<InvocationStats>,
+    ) -> Result<Vec<Record<InvocationStats>>, Error> {
+        if let Some(error) = first_error {
+            return Err(Error::PartitionFailed(error));
+        }
+        Ok(invocation_stats
+            .into_iter()
+            .map(|stats| {
+                self.record(InvocationStats {
+                    index: self.place(partition, stats.index),
+                    ..stats
+                })
+            })
+            .collect())
+    }
+
+    /// Every dispatcher's summary, stamped, and whether each did all of
+    /// its partition.
+    fn settle(
+        &self,
+        summaries: Vec<Option<DispatcherStats>>,
+        succeeded: &[usize],
+    ) -> (Vec<Record<DispatcherStats>>, Result<(), Error>) {
+        let finished: Vec<DispatcherStats> = summaries
+            .into_iter()
+            .map(|summary| summary.expect("a partition's stream ends with its summary or an error"))
+            .collect();
+        let checked = finished
+            .iter()
+            .zip(succeeded.iter().zip(&self.expected))
+            .try_for_each(|(stats, (&succeeded, &expected))| check(stats, succeeded, expected));
+        let records = finished
+            .into_iter()
+            .map(|stats| self.record(stats))
+            .collect();
+        (records, checked)
+    }
+}
+
+/// Start `inputs` through `call.dispatchers` dispatchers, for their
+/// outputs.
 ///
-/// Refuses, with nothing invoked, a call that could not have worked: a
-/// split no dispatcher could carry, or a partition over Lambda's
-/// request limit.
+/// Refuses, with nothing invoked, a call that could not have worked, as
+/// [`events`] says.
 pub(crate) fn start(
     invoker: Arc<dyn Invoker>,
     call: Call,
     inputs: Vec<Value>,
 ) -> Result<Batches, Error> {
+    let mut events = events(invoker, call, None, inputs)?;
+
+    Ok(Batches(Box::pin(try_stream! {
+        while let Some(event) = events.next().await {
+            match event? {
+                Event::Completed { succeeded, outputs, invocation_stats, .. } => {
+                    let batch = Batch {
+                        succeeded,
+                        outputs,
+                        invocation_stats,
+                        dispatcher_stats: Vec::new(),
+                    };
+                    if !batch.is_empty() {
+                        yield batch;
+                    }
+                }
+                Event::Summaries(dispatcher_stats) => {
+                    yield Batch { dispatcher_stats, ..Batch::default() };
+                }
+            }
+        }
+    })))
+}
+
+/// Start `inputs` through `call.dispatchers` dispatchers, combining with
+/// `combine` if given, and merge what they send as it arrives.
+///
+/// Refuses, with nothing invoked, a call that could not have worked: a
+/// split no dispatcher could carry, or a partition over Lambda's
+/// request limit.
+pub(crate) fn events(
+    invoker: Arc<dyn Invoker>,
+    call: Call,
+    combine: Option<Combine>,
+    inputs: Vec<Value>,
+) -> Result<BoxStream<'static, Result<Event, Error>>, Error> {
+    let (started, mut arriving) = launch(invoker, call, combine, inputs)?;
+
+    Ok(Box::pin(try_stream! {
+        let mut summaries: Vec<Option<DispatcherStats>> = vec![None; started.count];
+        let mut succeeded = vec![0; started.count];
+        while let Some((partition, frame)) = arriving.next().await {
+            match frame? {
+                Frame::Completed(Completed {
+                    succeeded: n,
+                    outputs,
+                    states,
+                    invocation_stats,
+                    first_error,
+                }) => {
+                    let invocation_stats = started.progress(partition, first_error, invocation_stats)?;
+                    succeeded[partition] += n;
+                    let place = |index: usize| started.place(partition, index);
+                    yield Event::Completed {
+                        succeeded: n,
+                        outputs: outputs
+                            .into_iter()
+                            .map(|output| (place(output.index), output.value))
+                            .collect(),
+                        states: states
+                            .into_iter()
+                            .map(|combined| {
+                                (combined.indexes.into_iter().map(place).collect(), combined.state)
+                            })
+                            .collect(),
+                        invocation_stats,
+                    };
+                }
+                Frame::Summary(stats) => summaries[partition] = Some(*stats),
+            }
+        }
+
+        let (dispatcher_stats, checked) = started.settle(summaries, &succeeded);
+        yield Event::Summaries(dispatcher_stats);
+        checked?;
+    }))
+}
+
+/// Plan the call, build one request per partition, and start their
+/// streams, merged as their frames arrive.
+#[allow(clippy::type_complexity)]
+fn launch(
+    invoker: Arc<dyn Invoker>,
+    call: Call,
+    combine: Option<Combine>,
+    inputs: Vec<Value>,
+) -> Result<(Started, BoxStream<'static, (usize, Result<Frame, Error>)>), Error> {
     let local = call.endpoint_url.is_some();
     let count = call
         .dispatchers
@@ -158,6 +333,7 @@ pub(crate) fn start(
                 retries: call.retries,
                 return_stats: call.return_stats,
                 return_outputs: call.return_outputs,
+                combine: combine.clone(),
             })
             .map_err(Error::json("building a dispatcher request"))
         })
@@ -172,74 +348,22 @@ pub(crate) fn start(
         }
     }
 
-    let number = call.number;
-    let call_start = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is after 1970")
-        .as_secs_f64();
-    let mut arriving = futures::stream::select_all(payloads.into_iter().enumerate().map(
+    let started = Started {
+        count,
+        expected,
+        number: call.number,
+        call_start: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_secs_f64(),
+    };
+    let arriving = futures::stream::select_all(payloads.into_iter().enumerate().map(
         |(partition, payload)| {
             frames(invoker.clone(), call.dispatcher_function.clone(), payload)
                 .map(move |frame| (partition, frame))
         },
     ));
-
-    Ok(Batches(Box::pin(try_stream! {
-        let mut summaries: Vec<Option<DispatcherStats>> = vec![None; count];
-        let mut succeeded = vec![0; count];
-        while let Some((partition, frame)) = arriving.next().await {
-            match frame? {
-                Frame::Completed(completed) => {
-                    // Retries are already spent, so the call cannot succeed
-                    // and this frame's outputs are moot.
-                    if let Some(error) = completed.first_error {
-                        Err(Error::InvocationFailed(error))?;
-                    }
-                    succeeded[partition] += completed.succeeded;
-                    // Partition k holds inputs[k::count].
-                    let place = |index: usize| partition + index * count;
-                    let batch = Batch {
-                        succeeded: completed.succeeded,
-                        outputs: completed
-                            .outputs
-                            .into_iter()
-                            .map(|output| (place(output.index), output.value))
-                            .collect(),
-                        invocation_stats: completed
-                            .invocation_stats
-                            .into_iter()
-                            .map(|stat| Record {
-                                record: InvocationStats { index: place(stat.index), ..stat },
-                                call: number,
-                                call_start,
-                            })
-                            .collect(),
-                        dispatcher_stats: Vec::new(),
-                    };
-                    if !batch.is_empty() {
-                        yield batch;
-                    }
-                }
-                Frame::Summary(stats) => summaries[partition] = Some(*stats),
-            }
-        }
-
-        let finished: Vec<DispatcherStats> = summaries
-            .into_iter()
-            .map(|summary| summary.expect("a partition's stream ends with its summary or an error"))
-            .collect();
-        yield Batch {
-            dispatcher_stats: finished
-                .iter()
-                .cloned()
-                .map(|record| Record { record, call: number, call_start })
-                .collect(),
-            ..Batch::default()
-        };
-        for (partition, stats) in finished.iter().enumerate() {
-            check(stats, succeeded[partition], expected[partition])?;
-        }
-    })))
+    Ok((started, Box::pin(arriving)))
 }
 
 /// One dispatcher's frames as they arrive, ending in its summary.

@@ -54,6 +54,17 @@ pub struct Request {
     pub return_stats: bool,
     /// Whether to send the workers' outputs back at all.
     pub return_outputs: bool,
+    /// Send back states of the combined outputs, rather than the outputs.
+    pub combine: Option<Combine>,
+}
+
+/// Which combiner a call combines with, and what to build it from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Combine {
+    /// Must be the dispatcher's `Combiner::NAME`.
+    pub combiner: String,
+    pub config: Value,
 }
 
 /// What goes over the wire, one JSON object per line: completed frames
@@ -77,10 +88,15 @@ pub struct Completed {
     /// Empty unless the request asked for outputs - and a worker that
     /// returned nothing has no entry here either way.
     pub outputs: Vec<Output>,
+    /// The combiner's state, for a call that combines, on the partition's
+    /// last `Completed` frame. Left off the wire when empty, as it always is
+    /// for a map.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<Combined>,
     /// Empty unless the request asked for stats.
     pub invocation_stats: Vec<InvocationStats>,
-    /// The first invocation of this frame to fail every attempt, as its
-    /// own message.
+    /// The first failure in this frame, as its own message: an invocation
+    /// that failed every attempt, or the combiner.
     pub first_error: Option<String>,
 }
 
@@ -89,6 +105,7 @@ impl Completed {
     pub fn is_empty(&self) -> bool {
         self.succeeded == 0
             && self.outputs.is_empty()
+            && self.states.is_empty()
             && self.invocation_stats.is_empty()
             && self.first_error.is_none()
     }
@@ -106,6 +123,17 @@ pub struct Output {
     /// As the worker wrote it: checked to be JSON, but never parsed into
     /// a tree, which takes several times the memory of the text.
     pub value: Box<RawValue>,
+}
+
+/// A combiner's state, and every index of the partition combined into it.
+///
+/// Each index that succeeded is in exactly one `Combined`, including one
+/// whose worker returned nothing, so `state` can be null.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Combined {
+    pub indexes: Vec<usize>,
+    pub state: Option<Box<RawValue>>,
 }
 
 /// Statistics for a single worker invocation.
@@ -148,7 +176,7 @@ pub struct DispatcherStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{Completed, DispatcherStats, Frame, InvocationStats, Output};
+    use super::{Combined, Completed, DispatcherStats, Frame, InvocationStats, Output};
     use serde_json::json;
 
     fn a_summary() -> DispatcherStats {
@@ -183,6 +211,17 @@ mod tests {
                     invoke_end: 2.0,
                 }],
                 first_error: Some("no".to_string()),
+                ..Completed::default()
+            }),
+            Frame::Completed(Completed {
+                succeeded: 2,
+                states: vec![Combined {
+                    indexes: vec![0, 4],
+                    state: Some(
+                        serde_json::value::to_raw_value(&json!({"sum": 2})).expect("serializes"),
+                    ),
+                }],
+                ..Completed::default()
             }),
             Frame::Summary(Box::new(a_summary())),
         ] {
