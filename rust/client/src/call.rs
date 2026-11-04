@@ -6,14 +6,20 @@ use crate::invoker::Invoker;
 use crate::plan::{dispatchers_for, partitions, shares};
 use crate::Error;
 use async_stream::try_stream;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::{BoxStream, Stream, StreamExt};
 pub use map_lambda_protocol::{DispatcherStats, InvocationStats};
-use map_lambda_protocol::{Frame, Request, MAX_REQUEST_BYTES};
+use map_lambda_protocol::{Frame, Request};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Lambda's hard cap on a synchronous request payload, which the whole
+/// `Request` has to fit: inputs, one copy of `constant_args`, and framing.
+pub(crate) const MAX_REQUEST_BYTES: usize = 6 * 1024 * 1024;
 
 /// What one `map_unordered` or `for_each` is asked to do.
 #[derive(Debug, Clone)]
@@ -36,6 +42,47 @@ pub(crate) struct Call {
     pub(crate) return_stats: bool,
     /// Which call of its session this is, stamped on every record.
     pub(crate) number: usize,
+}
+
+/// A call's batches as they arrive. It ends with an error if the call
+/// fails; dropping it closes the dispatchers' streams, as
+/// [`Session::map_unordered`](crate::Session::map_unordered) describes.
+///
+/// Read the batches for progress and stats, or use [`outputs`](Self::outputs)
+/// or [`finish`](Self::finish) for just the result.
+#[must_use = "a call invokes nothing until its batches are read"]
+pub struct Batches(BoxStream<'static, Result<Batch, Error>>);
+
+impl Batches {
+    /// Each `(index into inputs, output)` as it arrives, without the batches
+    /// around them.
+    pub fn outputs(
+        mut self,
+    ) -> impl Stream<Item = Result<(usize, Box<RawValue>), Error>> + Send + Unpin + 'static {
+        Box::pin(try_stream! {
+            while let Some(batch) = self.next().await {
+                for output in batch?.outputs {
+                    yield output;
+                }
+            }
+        })
+    }
+
+    /// Run the call to the end, which is what checks it.
+    pub async fn finish(mut self) -> Result<(), Error> {
+        while let Some(batch) = self.next().await {
+            batch?;
+        }
+        Ok(())
+    }
+}
+
+impl Stream for Batches {
+    type Item = Result<Batch, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.poll_next_unpin(cx)
+    }
 }
 
 /// What arrived since the last batch, numbered against the caller's
@@ -78,11 +125,6 @@ pub struct Record<T> {
     /// When that call began, as epoch seconds.
     pub call_start: f64,
 }
-
-/// A call's batches as they arrive. It ends with an error if the call
-/// fails; dropping it closes the dispatchers' streams, as
-/// [`Session::map_unordered`](crate::Session::map_unordered) describes.
-pub type Batches = BoxStream<'static, Result<Batch, Error>>;
 
 /// Start `inputs` through `call.dispatchers` dispatchers.
 ///
@@ -130,13 +172,11 @@ pub(crate) fn start(
         }
     }
 
-    let stamp = Stamp {
-        call: call.number,
-        call_start: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock is after 1970")
-            .as_secs_f64(),
-    };
+    let number = call.number;
+    let call_start = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs_f64();
     let mut arriving = futures::stream::select_all(payloads.into_iter().enumerate().map(
         |(partition, payload)| {
             frames(invoker.clone(), call.dispatcher_function.clone(), payload)
@@ -144,7 +184,7 @@ pub(crate) fn start(
         },
     ));
 
-    Ok(Box::pin(try_stream! {
+    Ok(Batches(Box::pin(try_stream! {
         let mut summaries: Vec<Option<DispatcherStats>> = vec![None; count];
         let mut succeeded = vec![0; count];
         while let Some((partition, frame)) = arriving.next().await {
@@ -168,7 +208,11 @@ pub(crate) fn start(
                         invocation_stats: completed
                             .invocation_stats
                             .into_iter()
-                            .map(|stat| stamp.on(InvocationStats { index: place(stat.index), ..stat }))
+                            .map(|stat| Record {
+                                record: InvocationStats { index: place(stat.index), ..stat },
+                                call: number,
+                                call_start,
+                            })
                             .collect(),
                         dispatcher_stats: Vec::new(),
                     };
@@ -185,29 +229,17 @@ pub(crate) fn start(
             .map(|summary| summary.expect("a partition's stream ends with its summary or an error"))
             .collect();
         yield Batch {
-            dispatcher_stats: finished.iter().cloned().map(|r| stamp.on(r)).collect(),
+            dispatcher_stats: finished
+                .iter()
+                .cloned()
+                .map(|record| Record { record, call: number, call_start })
+                .collect(),
             ..Batch::default()
         };
         for (partition, stats) in finished.iter().enumerate() {
             check(stats, succeeded[partition], expected[partition])?;
         }
-    }))
-}
-
-#[derive(Clone, Copy)]
-struct Stamp {
-    call: usize,
-    call_start: f64,
-}
-
-impl Stamp {
-    fn on<T>(self, record: T) -> Record<T> {
-        Record {
-            record,
-            call: self.call,
-            call_start: self.call_start,
-        }
-    }
+    })))
 }
 
 /// One dispatcher's frames as they arrive, ending in its summary.
@@ -236,8 +268,7 @@ fn frames(
 ///
 /// A short partition is silent - skipped work just never happens - so
 /// `succeeded`, the total across its frames, is checked against `expected`,
-/// the number of inputs this side sent. Not the summary's `succeeded`:
-/// only the frames carry outputs.
+/// the number of inputs this side sent.
 fn check(stats: &DispatcherStats, succeeded: usize, expected: usize) -> Result<(), Error> {
     if succeeded != expected {
         return Err(Error::PartitionShort {
@@ -261,11 +292,10 @@ mod tests {
     use serde_json::{json, Map};
     use std::sync::Arc;
 
-    fn stats(succeeded: usize) -> DispatcherStats {
+    fn stats(dispatched: usize) -> DispatcherStats {
         DispatcherStats {
             req_id: "dispatcher-0".to_string(),
-            dispatched: succeeded,
-            succeeded,
+            dispatched,
             retried: 0,
             retry_wait_ms: 0.0,
             cold: Some(false),
@@ -289,7 +319,7 @@ mod tests {
             let summary = json!({"Summary": stats(1)});
             let chunks: Vec<Result<Vec<u8>, Error>> = vec![
                 Ok(format!("{completed}\n{summary}\n").into_bytes()),
-                Err(Error::FailedMidStream("the stream failed".to_string())),
+                Err(Error::DispatcherFailed("the stream failed".to_string())),
             ];
             Box::pin(async move { Ok(Box::pin(futures::stream::iter(chunks)) as Chunks) })
         }
@@ -324,7 +354,7 @@ mod tests {
 
         assert!(matches!(
             batches.pop(),
-            Some(Err(Error::FailedMidStream(_)))
+            Some(Err(Error::DispatcherFailed(_)))
         ));
         assert!(batches.iter().all(Result::is_ok));
     }

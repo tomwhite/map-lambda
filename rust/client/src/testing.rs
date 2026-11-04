@@ -47,7 +47,8 @@ impl Invoker for Stub {
         self.requests.lock().expect("unpoisoned").push(payload);
         let body = self.bodies.lock().expect("unpoisoned").pop_front();
         Box::pin(async move {
-            let body = body.ok_or_else(|| Error::Transport("the stub has no body left".into()))?;
+            let body =
+                body.ok_or_else(|| Error::InvokeFailed("the stub has no body left".into()))?;
             Ok(Box::pin(body.map(Ok)) as Chunks)
         })
     }

@@ -91,13 +91,13 @@ Map-lambda provides **diagnostics** in the form of progress updates as the `map_
 
 ## Failures and retries
 
-A lambda function is retried only if there is a transport error - where the request may not have reached the worker. (Note that the client can't tell if the worker ran successfully or not - retrying is permitted only because the function is idempotent.) An error that another attempt can't change, like a missing permission or function, is not retried, so the call fails straight away.
+A worker invocation is retried only if the request to Lambda fails, rather than the worker itself - for example if it is throttled, Lambda returns a service error, or the connection drops. After a dropped connection or a service error the worker may still have run, so retrying is permitted only because the function is idempotent. An error that another attempt can't change, like a missing permission or function, is not retried, so the call fails straight away.
 
 The number of retries is set by the `retries` argument to the call, and defaults to 2. If the worker returns an `Error` it is *not* retried; it is assumed that the worker function will retry I/O errors itself.
 
 The call fails with a `RuntimeError` in any of the following cases:
 - if the inputs cannot be dispatched,
-- if any invocation fails (a worker error, or a transport error after retrying),
+- if any invocation fails (a worker error, or a request to Lambda that still fails after retrying),
 - if there is a stream error,
 - if the stream does not end with a summary frame,
 - or if the dispatcher fails.
@@ -197,11 +197,11 @@ To invoke a worker manually, use `cargo lambda` or `curl` directly:
 
 ```shell
 cargo lambda invoke echo \
-  --data-ascii '{"path":"/tmp/map-lambda-echo","i":1,"timing_map":{},"default_sleep":0.0}'
+  --data-ascii '{"i":1,"default_sleep":0.0}'
 
 curl -X POST \
   http://localhost:9000/2015-03-31/functions/echo/invocations \
-  -d '{"path":"/tmp/map-lambda-echo","i":1,"timing_map":{},"default_sleep":0.0}'
+  -d '{"i":1,"default_sleep":0.0}'
 ```
 
 <!-- --8<-- [end:development] -->

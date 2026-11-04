@@ -1,6 +1,6 @@
 //! What can go wrong between asking for a call and getting its outputs.
 
-use map_lambda_protocol::MAX_REQUEST_BYTES;
+use crate::call::MAX_REQUEST_BYTES;
 use thiserror::Error;
 
 /// Why a call was refused or failed.
@@ -64,14 +64,11 @@ pub enum Error {
     )]
     NoSummary,
 
-    #[error("dispatcher invocation failed: {0}")]
+    #[error("the dispatcher failed: {0}")]
     DispatcherFailed(String),
 
-    #[error("dispatcher failed mid-stream: {0}")]
-    FailedMidStream(String),
-
-    #[error("could not reach Lambda: {0}")]
-    Transport(String),
+    #[error("invoking Lambda failed: {0}")]
+    InvokeFailed(String),
 
     #[error("{context}: {source}")]
     Json {

@@ -43,7 +43,6 @@ def test_echo(tmp_path):
 
     assert len(partitions) == 1
     assert partitions[0]["dispatched"] == 3
-    assert partitions[0]["succeeded"] == 3
 
     assert sorted(record["index"] for record in records) == [0, 1, 2]
     # Present but empty: `cargo lambda watch` sets no `x-amzn-requestid`.
@@ -69,7 +68,6 @@ def test_a_real_dispatcher_sends_every_field_this_side_reads(tmp_path):
     assert set(partitions[0]) == {
         "req_id",
         "dispatched",
-        "succeeded",
         "retried",
         "retry_wait_ms",
         "cold",
@@ -101,6 +99,11 @@ def test_a_real_dispatcher_sends_every_field_this_side_reads(tmp_path):
 )  # fmt: off
 @pytest.mark.lambda_integration
 def test_echo_success(tmp_path, timing_map, n_tasks, retries, total_expected_retries):
+    """
+    Only `cargo lambda watch` retries a failing worker: it answers with a
+    500, which reads as a failed invoke. Real Lambda reports the failure
+    and the call stops, so this cannot run against AWS.
+    """
     path = str(tmp_path)
     outputs, partitions, _ = asyncio.run(
         echo(

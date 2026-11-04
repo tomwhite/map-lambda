@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ._native import MAX_STREAMS_PER_CONNECTION
+from ._native import STREAMS_PER_CONNECTION
 
 # One record, at either level.
 Stats = dict[str, Any]
@@ -158,7 +158,7 @@ def summarize_dispatchers(dispatcher_stats: list[Stats]) -> str:
         f"                {dispatched:,} invocations dispatched, "
         f"{retried:,} retried{share}{waiting}\n"
         f"                {per_dispatcher} HTTP/2 connection(s) per dispatcher, "
-        f"~{widest * MAX_STREAMS_PER_CONNECTION:,} in flight available\n"
+        f"~{widest * STREAMS_PER_CONNECTION:,} in flight available\n"
         f"                slowest partition {slowest:.1f}s, worst spread within a "
         f"call {max(spreads):.1f}s"
     )

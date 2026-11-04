@@ -14,40 +14,6 @@ pub const DEFAULT_DISPATCHER_FUNCTION: &str = "dispatcher";
 /// Worker invocations in flight per call, by default.
 pub const DEFAULT_CONCURRENCY: usize = 100;
 
-/// How the calls through a [`Session`] run.
-///
-/// ```
-/// let mut settings = map_lambda_client::Settings::default();
-/// settings.concurrency = 1_000;
-/// ```
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct Settings {
-    /// The name the dispatcher is deployed under.
-    pub dispatcher_function: String,
-    /// How many dispatchers a call's inputs are partitioned across, or
-    /// `None` for the fewest that respect Lambda's limits.
-    pub dispatchers: Option<usize>,
-    /// Worker invocations in flight across a whole call.
-    pub concurrency: usize,
-    /// Extra attempts after a *transport* failure, per invocation.
-    pub retries: usize,
-    /// Whether batches carry [`Batch::invocation_stats`](crate::Batch::invocation_stats).
-    pub return_stats: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            dispatcher_function: DEFAULT_DISPATCHER_FUNCTION.to_string(),
-            dispatchers: None,
-            concurrency: DEFAULT_CONCURRENCY,
-            retries: 2,
-            return_stats: false,
-        }
-    }
-}
-
 /// A session with the deployed lambdas, which numbers its calls.
 pub struct Session {
     invoker: Arc<dyn Invoker>,
@@ -80,11 +46,6 @@ impl Session {
     pub fn with_settings(mut self, settings: Settings) -> Self {
         self.settings = settings;
         self
-    }
-
-    /// The settings calls run with.
-    pub fn settings(&self) -> &Settings {
-        &self.settings
     }
 
     /// The settings calls run with, to change.
@@ -158,10 +119,45 @@ impl Session {
     }
 }
 
+/// How the calls through a [`Session`] run.
+///
+/// ```
+/// let mut settings = map_lambda_client::Settings::default();
+/// settings.concurrency = 1_000;
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Settings {
+    /// The name the dispatcher is deployed under.
+    pub dispatcher_function: String,
+    /// How many dispatchers a call's inputs are partitioned across, or
+    /// `None` for the fewest that respect Lambda's limits.
+    pub dispatchers: Option<usize>,
+    /// Worker invocations in flight across a whole call.
+    pub concurrency: usize,
+    /// Extra attempts after a failed invoke, per invocation.
+    pub retries: usize,
+    /// Whether batches carry [`Batch::invocation_stats`](crate::Batch::invocation_stats).
+    pub return_stats: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            dispatcher_function: DEFAULT_DISPATCHER_FUNCTION.to_string(),
+            dispatchers: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            retries: 2,
+            return_stats: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Session, Settings};
     use crate::testing::Stub;
+    use crate::Error;
     use futures::executor::block_on;
     use futures::StreamExt;
     use serde_json::{json, Map, Value};
@@ -173,7 +169,7 @@ mod tests {
         for _ in 0..calls {
             let body = stub.respond();
             let summary = json!({"Summary": {
-                "req_id": "d-0", "dispatched": 1, "succeeded": 1, "retried": 0,
+                "req_id": "d-0", "dispatched": 1, "retried": 0,
                 "retry_wait_ms": 0.0, "cold": false, "connections": 1, "elapsed_ms": 1.0,
             }});
             let completed = json!({"Completed": {
@@ -217,6 +213,24 @@ mod tests {
             }
             calls
         })
+    }
+
+    /// A stub with one dispatcher queued, sending `frames` as they are.
+    fn sending(frames: &[Value]) -> Arc<Stub> {
+        let stub = Arc::new(Stub::default());
+        let body = stub.respond();
+        for frame in frames {
+            body.unbounded_send(format!("{frame}\n").into_bytes())
+                .expect("open");
+        }
+        stub
+    }
+
+    fn summary(dispatched: usize) -> Value {
+        json!({"Summary": {
+            "req_id": "d-0", "dispatched": dispatched, "retried": 0,
+            "retry_wait_ms": 0.0, "cold": false, "connections": 1, "elapsed_ms": 1.0,
+        }})
     }
 
     fn requests(stub: &Stub) -> Vec<Value> {
@@ -266,5 +280,65 @@ mod tests {
             .map(|r| r["return_outputs"].clone())
             .collect();
         assert_eq!(asked, [json!(true), json!(false)]);
+    }
+
+    #[test]
+    fn outputs_are_every_batchs_outputs_in_turn() {
+        let stub = sending(&[
+            json!({"Completed": {
+                "succeeded": 1, "outputs": [{"index": 0, "value": "a"}],
+                "invocation_stats": [], "first_error": null,
+            }}),
+            json!({"Completed": {
+                "succeeded": 1, "outputs": [{"index": 1, "value": "b"}],
+                "invocation_stats": [], "first_error": null,
+            }}),
+            summary(2),
+        ]);
+        let session = Session::new(stub, None).with_settings(one_dispatcher());
+        let outputs = session
+            .map_unordered("worker", vec![json!(0), json!(1)], "i", Map::new())
+            .expect("starts")
+            .outputs();
+
+        let outputs: Vec<_> = block_on(outputs.collect::<Vec<_>>())
+            .into_iter()
+            .map(|output| {
+                let (index, value) = output.expect("clean");
+                (index, value.get().to_string())
+            })
+            .collect();
+        assert_eq!(
+            outputs,
+            [(0, r#""a""#.to_string()), (1, r#""b""#.to_string())]
+        );
+    }
+
+    #[test]
+    fn finish_runs_a_clean_call_to_the_end() {
+        let session = Session::new(responding(1), None).with_settings(one_dispatcher());
+        let batches = session
+            .for_each("worker", vec![json!(0)], "i", Map::new())
+            .expect("starts");
+
+        block_on(batches.finish()).expect("clean");
+    }
+
+    /// Draining is what checks a call, so `finish` has to report what it finds.
+    #[test]
+    fn finish_reports_a_failed_invocation() {
+        let stub = sending(&[json!({"Completed": {
+            "succeeded": 0, "outputs": [], "invocation_stats": [], "first_error": "boom",
+        }})]);
+        let session = Session::new(stub, None).with_settings(one_dispatcher());
+        let batches = session
+            .for_each("worker", vec![json!(0)], "i", Map::new())
+            .expect("starts");
+
+        let error = block_on(batches.finish()).expect_err("failed");
+        assert!(
+            matches!(error, Error::InvocationFailed(ref message) if message == "boom"),
+            "{error}"
+        );
     }
 }

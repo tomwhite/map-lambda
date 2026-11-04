@@ -40,32 +40,6 @@ def _outputs(invoker: Any, inputs: list[Any], **settings: Any) -> list[tuple[int
     return asyncio.run(drain())
 
 
-def test_every_answer_carries_the_position_of_its_input_across_partitions():
-    """
-    Partitions are strided, so a dispatcher's own 0, 1, 2 are inputs
-    0, 2, 4 - and unordered yields are joinable only by that number.
-    """
-    invoker = RecordingInvoker(
-        [
-            [
-                completed(
-                    succeeded=3,
-                    outputs=[{"index": 0, "value": "a"}, {"index": 2, "value": "e"}],
-                ),
-                {"Summary": dispatcher_summary(3)},
-            ],
-            [
-                completed(succeeded=2, outputs=[{"index": 1, "value": "d"}]),
-                {"Summary": dispatcher_summary(2)},
-            ],
-        ]
-    )
-
-    outputs = _outputs(invoker, list("abcde"), dispatchers=2, concurrency=8)
-
-    assert sorted(outputs) == [(0, "a"), (3, "d"), (4, "e")]
-
-
 def test_an_answer_reaches_the_caller_before_the_run_has_finished():
     """
     The dispatcher's summary frame is not written until the test has been
@@ -101,7 +75,7 @@ def test_a_losing_run_keeps_the_answers_it_had_already_handed_over():
             [
                 completed(succeeded=1, outputs=[{"index": 0, "value": "a"}]),
                 completed(succeeded=1, outputs=[{"index": 1, "value": "b"}], first_error="boom"),
-                {"Summary": dispatcher_summary(2, dispatched=3)},
+                {"Summary": dispatcher_summary(3)},
             ]
         ]
     )
@@ -168,7 +142,7 @@ def test_an_abandoned_run_raises_nothing_however_it_went():
         [
             [
                 completed(succeeded=1, outputs=[{"index": 0, "value": "first"}]),
-                {"Summary": dispatcher_summary(1, dispatched=2)},
+                {"Summary": dispatcher_summary(2)},
             ]
         ]
     )

@@ -5,8 +5,10 @@
 //! `ReportCallback`, so a test can record the frames instead.
 
 use crate::invoke::{invoke_with_retries, payload_for, Outcome};
-use crate::protocol::{connections_for, Completed, DispatcherStats, Request};
-use crate::tally::{Return, Tally};
+use crate::protocol::{
+    Completed, DispatcherStats, Request, MAX_LAMBDA_CLIENTS, STREAMS_PER_CONNECTION,
+};
+use crate::tally::Tally;
 use aws_sdk_lambda::Client as LambdaClient;
 use futures::stream::StreamExt;
 use lambda_runtime::Error;
@@ -22,18 +24,6 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 /// An `Err` means the report cannot be delivered, and the partition stops.
 pub(crate) trait ReportCallback {
     async fn completed(&mut self, completed: Completed) -> Result<(), Error>;
-}
-
-/// The connection with the fewest invocations in flight, the earliest of
-/// any tied.
-///
-/// Never above an even share of `max_in_flight`, which `connections_for`
-/// keeps within `STREAMS_PER_CONNECTION`. Dealing inputs out by position
-/// would not be: the slow ones can land together and stay there.
-fn least_busy(in_flight: &[AtomicUsize]) -> usize {
-    (0..in_flight.len())
-        .min_by_key(|&connection| in_flight[connection].load(Ordering::Relaxed))
-        .expect("at least one connection")
 }
 
 /// Run one partition: invoke `worker_function` once per input, with
@@ -62,10 +52,7 @@ pub(crate) async fn dispatch<S: ReportCallback>(
     let connections = connections_for(max_in_flight).min(lambda_clients.len());
     let dispatched = inputs.len();
 
-    let mut tally = Tally::returning(Return {
-        stats: return_stats,
-        outputs: return_outputs,
-    });
+    let mut tally = Tally::new(return_stats, return_outputs);
 
     // Empty, but before any work, so "slow" and "never started" look
     // different from the client.
@@ -114,28 +101,54 @@ pub(crate) async fn dispatch<S: ReportCallback>(
                 None => break,
             },
             _ = report.tick() => {
-                let batch = tally.take_completed();
-                if !batch.is_empty() {
-                    callback.completed(batch).await?;
+                let completed = tally.take_completed();
+                if !completed.is_empty() {
+                    callback.completed(completed).await?;
                 }
             }
         }
     }
 
     // Whatever the last tick missed.
-    let batch = tally.take_completed();
-    if !batch.is_empty() {
-        callback.completed(batch).await?;
+    let completed = tally.take_completed();
+    if !completed.is_empty() {
+        callback.completed(completed).await?;
     }
 
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    Ok(tally.into_stats(req_id, dispatched, cold, connections, elapsed_ms))
+    Ok(DispatcherStats {
+        req_id,
+        dispatched,
+        retried: tally.retried(),
+        retry_wait_ms: tally.retry_wait_ms(),
+        cold,
+        connections,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+/// How many connections `max_in_flight` invocations need.
+fn connections_for(max_in_flight: usize) -> usize {
+    max_in_flight
+        .div_ceil(STREAMS_PER_CONNECTION)
+        .clamp(1, MAX_LAMBDA_CLIENTS)
+}
+
+/// The connection with the fewest invocations in flight, the earliest of
+/// any tied.
+///
+/// Never above an even share of `max_in_flight`, which `connections_for`
+/// keeps within `STREAMS_PER_CONNECTION`. Dealing inputs out by position
+/// would not be: the slow ones can land together and stay there.
+fn least_busy(in_flight: &[AtomicUsize]) -> usize {
+    (0..in_flight.len())
+        .min_by_key(|&connection| in_flight[connection].load(Ordering::Relaxed))
+        .expect("at least one connection")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch, Completed, ReportCallback};
-    use crate::protocol::{Request, STREAMS_PER_CONNECTION};
+    use super::{connections_for, dispatch, Completed, ReportCallback};
+    use crate::protocol::{Request, MAX_IN_FLIGHT, MAX_LAMBDA_CLIENTS, STREAMS_PER_CONNECTION};
     use aws_config::retry::RetryConfig;
     use aws_credential_types::Credentials;
     use aws_sdk_lambda::config::Region;
@@ -163,6 +176,12 @@ mod tests {
     }
 
     impl Recorder {
+        /// The successes across every frame, which is what the client
+        /// checks a partition against.
+        fn succeeded(&self) -> usize {
+            self.frames.iter().map(|f| f.succeeded).sum()
+        }
+
         /// The outputs across every frame, which is where a client
         /// finds them: nothing repeats them at the end.
         fn outputs(&self) -> Vec<Value> {
@@ -382,38 +401,40 @@ mod tests {
         .expect("a request")
     }
 
-    /// A worker with nothing to say costs nothing on the wire: no
-    /// output frames at all, not empty ones and not a labelled entry
-    /// each saying null.
+    // ---- dispatch: what a partition reports ----
+
     #[tokio::test]
-    async fn a_worker_that_returns_nothing_sends_no_frames() {
-        let lambda_clients = replaying(vec![worker_silent(), worker_silent(), worker_silent()]);
-        let mut callback = Recorder::default();
-
-        dispatch(
-            a_request(3),
-            "c-0".into(),
-            &lambda_clients,
-            Some(false),
-            &mut callback,
-        )
-        .await
-        .expect("dispatched");
-
-        assert!(callback.outputs().is_empty(), "{:?}", callback.outputs());
-    }
-
-    /// Silence is not failure: the partition still ran, and the summary
-    /// frame says so. Nothing downstream should read an empty `outputs`
-    /// as work that did not happen - `check` reads the counts.
-    #[tokio::test]
-    async fn a_silent_worker_still_counts_as_succeeded() {
-        let lambda_clients = replaying(vec![worker_silent(), worker_silent()]);
+    async fn every_input_becomes_an_invocation_and_is_counted() {
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
         let mut callback = Recorder::default();
 
         let stats = dispatch(
+            a_request(3),
+            "dispatcher-0".into(),
+            &lambda_clients,
+            Some(true),
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        let record = serde_json::to_value(&stats).expect("serializable");
+        assert_eq!(record["dispatched"], 3);
+        assert_eq!(callback.succeeded(), 3);
+        assert_eq!(record["req_id"], "dispatcher-0");
+        assert_eq!(record["cold"], true);
+    }
+
+    /// So "slow" and "never started" do not look the same from the
+    /// client.
+    #[tokio::test]
+    async fn an_empty_frame_is_sent_before_any_invocation_lands() {
+        let lambda_clients = replaying(vec![worker_ok(), worker_ok()]);
+        let mut callback = Recorder::default();
+
+        dispatch(
             a_request(2),
-            "c-0".into(),
+            "dispatcher-0".into(),
             &lambda_clients,
             Some(false),
             &mut callback,
@@ -421,7 +442,8 @@ mod tests {
         .await
         .expect("dispatched");
 
-        assert_eq!(stats.succeeded, 2);
+        let opening = callback.frames.first().expect("a frame");
+        assert!(opening.is_empty());
     }
 
     /// The worker's own body, verbatim, against the position of the
@@ -459,12 +481,54 @@ mod tests {
         );
     }
 
-    /// The last batch goes out even if no timer tick fell after it.
+    /// A worker with nothing to say costs nothing on the wire: no
+    /// output frames at all, not empty ones and not a labelled entry
+    /// each saying null.
+    #[tokio::test]
+    async fn a_worker_that_returns_nothing_sends_no_frames() {
+        let lambda_clients = replaying(vec![worker_silent(), worker_silent(), worker_silent()]);
+        let mut callback = Recorder::default();
+
+        dispatch(
+            a_request(3),
+            "c-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        assert!(callback.outputs().is_empty(), "{:?}", callback.outputs());
+    }
+
+    /// Silence is not failure: the partition still ran, and its frames
+    /// say so. Nothing downstream should read an empty `outputs` as work
+    /// that did not happen - `check` reads the counts.
+    #[tokio::test]
+    async fn a_silent_worker_still_counts_as_succeeded() {
+        let lambda_clients = replaying(vec![worker_silent(), worker_silent()]);
+        let mut callback = Recorder::default();
+
+        dispatch(
+            a_request(2),
+            "c-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut callback,
+        )
+        .await
+        .expect("dispatched");
+
+        assert_eq!(callback.succeeded(), 2);
+    }
+
+    /// The last frame goes out even if no timer tick fell after it.
     /// Three invocations finish far inside one reporting interval, so
     /// without the final drain this reports nothing but the opening
     /// frame.
     #[tokio::test]
-    async fn the_last_batch_is_sent_after_the_loop() {
+    async fn the_last_frame_is_sent_after_the_loop() {
         let lambda_clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
         let mut callback = Recorder::default();
 
@@ -483,33 +547,13 @@ mod tests {
         assert_eq!(callback.frames[1].outputs.len(), 3);
     }
 
+    // ---- dispatch: failures ----
+
+    /// A failed worker does not end the partition: the dispatcher reports
+    /// it and waits for what is in flight, and the client is what raises.
     #[tokio::test]
-    async fn every_input_becomes_an_invocation_and_is_counted() {
-        let lambda_clients = replaying(vec![worker_ok(), worker_ok(), worker_ok()]);
-        let mut callback = Recorder::default();
-
-        let stats = dispatch(
-            a_request(3),
-            "dispatcher-0".into(),
-            &lambda_clients,
-            Some(true),
-            &mut callback,
-        )
-        .await
-        .expect("dispatched");
-
-        let record = serde_json::to_value(&stats).expect("serializable");
-        assert_eq!(record["dispatched"], 3);
-        assert_eq!(record["succeeded"], 3);
-        assert_eq!(record["req_id"], "dispatcher-0");
-        assert_eq!(record["cold"], true);
-    }
-
-    /// So "slow" and "never started" do not look the same from the
-    /// client.
-    #[tokio::test]
-    async fn an_empty_frame_is_sent_before_any_invocation_lands() {
-        let lambda_clients = replaying(vec![worker_ok(), worker_ok()]);
+    async fn a_failed_invocation_is_reported_rather_than_returned() {
+        let lambda_clients = replaying(vec![worker_ok(), worker_failed()]);
         let mut callback = Recorder::default();
 
         dispatch(
@@ -522,28 +566,7 @@ mod tests {
         .await
         .expect("dispatched");
 
-        let opening = callback.frames.first().expect("a frame");
-        assert!(opening.is_empty());
-    }
-
-    /// A failed worker does not end the partition: the dispatcher reports
-    /// it and waits for what is in flight, and the client is what raises.
-    #[tokio::test]
-    async fn a_failed_invocation_is_reported_rather_than_returned() {
-        let lambda_clients = replaying(vec![worker_ok(), worker_failed()]);
-        let mut callback = Recorder::default();
-
-        let stats = dispatch(
-            a_request(2),
-            "dispatcher-0".into(),
-            &lambda_clients,
-            Some(false),
-            &mut callback,
-        )
-        .await
-        .expect("dispatched");
-
-        assert_eq!(stats.succeeded, 1);
+        assert_eq!(callback.succeeded(), 1);
         let reported = callback
             .frames
             .iter()
@@ -556,18 +579,19 @@ mod tests {
         let lambda_clients = replaying(vec![worker_failed(), worker_ok(), worker_ok()]);
         let mut request = a_request(3);
         request.max_in_flight = 1;
+        let mut callback = Recorder::default();
 
-        let stats = dispatch(
+        dispatch(
             request,
             "dispatcher-0".into(),
             &lambda_clients,
             Some(false),
-            &mut Recorder::default(),
+            &mut callback,
         )
         .await
         .expect("dispatched");
 
-        assert_eq!(stats.succeeded, 0);
+        assert_eq!(callback.succeeded(), 0);
     }
 
     /// A failure can be the whole of a frame: nothing succeeded
@@ -595,6 +619,27 @@ mod tests {
         let reported = callback.frames[1].first_error.as_deref();
         assert!(reported.expect("a message").contains("boom"));
     }
+
+    #[tokio::test]
+    async fn a_callback_that_fails_stops_the_partition() {
+        let lambda_clients = replaying(vec![worker_ok()]);
+
+        let result = dispatch(
+            a_request(1),
+            "dispatcher-0".into(),
+            &lambda_clients,
+            Some(false),
+            &mut Gone,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a partition nobody is listening to must stop"
+        );
+    }
+
+    // ---- dispatch: when frames go out ----
 
     /// An output must not depend on a slower worker to carry it out: the
     /// dispatcher could die first, and the client would never see it.
@@ -625,7 +670,7 @@ mod tests {
         let lambda_clients = first_input_is_fast(worker_failed);
         let mut callback = Timed::new();
 
-        let stats = dispatch(
+        dispatch(
             a_request(2),
             "c-0".into(),
             &lambda_clients,
@@ -638,7 +683,8 @@ mod tests {
         let (at, frame) = &callback.frames[1];
         assert!(frame.first_error.is_some());
         assert!(*at < SLOW_WORKER, "the failure waited until {at:?}");
-        assert_eq!(stats.succeeded, 1, "what was in flight still finishes");
+        let succeeded: usize = callback.frames.iter().map(|(_, f)| f.succeeded).sum();
+        assert_eq!(succeeded, 1, "what was in flight still finishes");
     }
 
     /// Ticks with nothing to report cost nothing on the wire.
@@ -661,7 +707,31 @@ mod tests {
         assert_eq!(callback.frames.len(), 3);
     }
 
-    /// Past `MAX_STREAMS_PER_CONNECTION` requests queue on their connection
+    // ---- connections_for ----
+
+    #[test]
+    fn connections_cover_the_concurrency_asked_for() {
+        // Too few connections does not error; the run is just slower.
+        for max_in_flight in [1usize, 99, 100, 101, 128, 900, MAX_IN_FLIGHT] {
+            let n = connections_for(max_in_flight);
+            assert!(
+                n * STREAMS_PER_CONNECTION >= max_in_flight,
+                "{max_in_flight} in flight over {n} connection(s)"
+            );
+            assert!((1..=MAX_LAMBDA_CLIENTS).contains(&n));
+        }
+    }
+
+    #[test]
+    fn one_connection_is_enough_below_the_stream_limit() {
+        assert_eq!(connections_for(1), 1);
+        assert_eq!(connections_for(STREAMS_PER_CONNECTION), 1);
+        assert_eq!(connections_for(STREAMS_PER_CONNECTION + 1), 2);
+    }
+
+    // ---- least_busy ----
+
+    /// Past Lambda's stream limit requests queue on their connection
     /// however idle the others are, so slow inputs must not pile up on one.
     #[tokio::test(start_paused = true)]
     async fn slow_invocations_do_not_pile_up_on_one_connection() {
@@ -686,25 +756,6 @@ mod tests {
         assert!(
             peaks.iter().all(|peak| *peak <= STREAMS_PER_CONNECTION),
             "{peaks:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_callback_that_fails_stops_the_partition() {
-        let lambda_clients = replaying(vec![worker_ok()]);
-
-        let result = dispatch(
-            a_request(1),
-            "dispatcher-0".into(),
-            &lambda_clients,
-            Some(false),
-            &mut Gone,
-        )
-        .await;
-
-        assert!(
-            result.is_err(),
-            "a partition nobody is listening to must stop"
         );
     }
 }

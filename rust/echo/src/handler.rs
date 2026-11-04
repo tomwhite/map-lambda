@@ -11,12 +11,18 @@ fn default_sleep_secs() -> f64 {
 }
 
 /// A worker that can run normally, run slowly, or fail, depending on
-/// the input and how many times it has already been invoked for that
-/// input.
+/// the input and, with `path`, how many times it has already been invoked
+/// for that input.
 #[derive(Deserialize)]
 pub(crate) struct Request {
-    /// Directory used to persist per-input invocation counts
-    path: String,
+    /// Directory to keep per-input invocation counts in, so that successive
+    /// attempts at an input follow successive `timing_map` codes. Without
+    /// it, every invocation uses the first code.
+    ///
+    /// Only useful against `cargo lambda watch`, which answers a failing
+    /// worker with a 500 that the dispatcher retries.
+    #[serde(default)]
+    path: Option<String>,
     /// The input value being processed.
     i: i64,
     /// Maps an input value (as a string, since JSON object keys are
@@ -24,8 +30,8 @@ pub(crate) struct Request {
     /// invocations of that input. The magnitude is the number of
     /// seconds to sleep; the sign indicates the input should be
     /// returned normally (>= 0) or a deliberate failure raised (< 0).
-    /// An input missing from the map, or with fewer codes than the
-    /// current invocation count, runs normally after `default_sleep`.
+    /// An input missing from the map, or with fewer codes than its
+    /// invocation count, runs normally after `default_sleep`.
     #[serde(default)]
     timing_map: HashMap<String, Vec<f64>>,
     /// Sleep duration (in seconds) used when `timing_map` doesn't cover
@@ -57,7 +63,10 @@ pub(crate) async fn function_handler(event: LambdaEvent<Request>) -> Result<Resp
     let payload = event.payload;
     let i = payload.i;
 
-    let invocation_count = increment_invocation_count(Path::new(&payload.path), i)?;
+    let invocation_count = match &payload.path {
+        Some(path) => increment_invocation_count(Path::new(path), i)?,
+        None => 0,
+    };
 
     let timing_code = payload
         .timing_map
@@ -94,7 +103,7 @@ mod tests {
         let (_dir, path) = temp_dir();
         let event = LambdaEvent::new(
             Request {
-                path,
+                path: Some(path),
                 i: 7,
                 timing_map: HashMap::new(),
                 default_sleep: 0.0,
@@ -114,7 +123,7 @@ mod tests {
         // first invocation fails
         let event = LambdaEvent::new(
             Request {
-                path: path.clone(),
+                path: Some(path.clone()),
                 i: 7,
                 timing_map: timing_map.clone(),
                 default_sleep: 0.0,
@@ -132,7 +141,7 @@ mod tests {
         // second invocation (beyond the timing_map's single entry) succeeds
         let event = LambdaEvent::new(
             Request {
-                path,
+                path: Some(path),
                 i: 7,
                 timing_map,
                 default_sleep: 0.0,
@@ -141,5 +150,23 @@ mod tests {
         );
         let response = function_handler(event).await.unwrap();
         assert_eq!(response.i, 7)
+    }
+
+    /// Nothing is counted, so a second attempt fails just like the first.
+    #[tokio::test]
+    async fn without_a_path_every_invocation_uses_the_first_code() {
+        let timing_map = HashMap::from([("7".to_string(), vec![-0.01])]);
+        for _ in 0..2 {
+            let event = LambdaEvent::new(
+                Request {
+                    path: None,
+                    i: 7,
+                    timing_map: timing_map.clone(),
+                    default_sleep: 0.0,
+                },
+                Context::default(),
+            );
+            assert!(function_handler(event).await.is_err());
+        }
     }
 }

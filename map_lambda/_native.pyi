@@ -4,7 +4,7 @@ from typing import Any, final
 DEFAULT_CONCURRENCY: int
 DEFAULT_DISPATCHER_FUNCTION: str
 LOCAL_ENDPOINT_URL: str
-MAX_STREAMS_PER_CONNECTION: int
+STREAMS_PER_CONNECTION: int
 
 @final
 class Invoker: ...
