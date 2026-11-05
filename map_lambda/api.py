@@ -11,7 +11,8 @@ DEFAULT_CONCURRENCY: int = _native.DEFAULT_CONCURRENCY
 # A local `cargo lambda watch` server, started from rust/.
 LOCAL_ENDPOINT_URL = _native.LOCAL_ENDPOINT_URL
 
-DEFAULT_DISPATCHER_FUNCTION: str = _native.DEFAULT_DISPATCHER_FUNCTION
+# The dispatcher's name, before a project prefixes it.
+DISPATCHER: str = _native.DISPATCHER
 
 __docformat__ = "google"
 
@@ -30,6 +31,15 @@ class Session:
     `None` uses AWS with credentials and region picked up from the local
     environment; [`LOCAL_ENDPOINT_URL`][map_lambda.LOCAL_ENDPOINT_URL] uses a local cargo
     lambda watch instead.
+    """
+
+    project: str | None = None
+    """
+    The project the lambdas were deployed as, which prefixes every name on AWS:
+    the dispatcher is `<project>-dispatcher`, and a worker `"copy"` is
+    `<project>-copy`. `None` uses the names as given. Against a local cargo lambda
+    watch, names are never prefixed, as it serves each function under its binary's
+    name.
     """
 
     dispatchers: int | Literal["auto"] = "auto"
@@ -109,6 +119,15 @@ class Session:
             self._native_session = _native.Session(self._invoker, self.endpoint_url)
         return self._native_session
 
+    def function_name(self, name: str, /, *, memory: int | None = None) -> str:
+        """
+        The name a call to `name` invokes, such as `<project>-copy-3538` on AWS, for
+        finding the function's logs or metrics. Works whether or not the session is open.
+        """
+        return _native.function_name(
+            name, memory=memory, project=self.project, local=self.endpoint_url is not None
+        )
+
     def map_unordered(
         self,
         function_name: str,
@@ -117,6 +136,7 @@ class Session:
         *,
         input_key: str,
         constant_args: dict[str, Any] | None = None,
+        memory: int | None = None,
     ) -> AsyncGenerator[tuple[int, Any], None]:
         """
         Invoke `function_name` once per value of `inputs`, yielding
@@ -127,12 +147,14 @@ class Session:
         under `input_key`, plus a copy of `constant_args` (if supplied).
 
         Args:
-            function_name: The name of the deployed lambda function.
+            function_name: The worker's name in its project, such as `"copy"`.
             inputs: The values to pass to the function, one entry per invocation.
             input_key: The name of the key for the input in each worker's
                 payload. Must match the field the worker deserialises it into:
                 for a Rust worker, a field of its `Request` struct.
             constant_args: Optional extra arguments to pass to each function invocation.
+            memory: Which of the worker's deployed memory sizes to use, in MB, or
+                `None` for its default. On AWS this calls `<name>-<memory>`.
 
         Yields:
             `(index, output)`, in the order the invocations finished.
@@ -143,6 +165,7 @@ class Session:
             inputs,
             input_key=input_key,
             constant_args=constant_args,
+            memory=memory,
             return_outputs=True,
         )
 
@@ -155,6 +178,7 @@ class Session:
         *,
         input_key: str,
         constant_args: dict[str, Any] | None,
+        memory: int | None,
         return_outputs: bool,
     ) -> AsyncGenerator[tuple[int, Any], None]:
         """
@@ -164,9 +188,10 @@ class Session:
         batches = native_session.start(
             function_name,
             inputs,
+            memory=memory,
             input_key=input_key,
             constant_args={} if constant_args is None else constant_args,
-            dispatcher_function=DEFAULT_DISPATCHER_FUNCTION,
+            project=self.project,
             dispatchers=None if self.dispatchers == "auto" else self.dispatchers,
             concurrency=self.concurrency,
             retries=self.retries,
@@ -196,6 +221,7 @@ class Session:
         *,
         input_key: str,
         constant_args: dict[str, Any] | None = None,
+        memory: int | None = None,
     ) -> None:
         """
         Invoke `function_name` once for each value of `inputs`. This is
@@ -211,6 +237,7 @@ class Session:
             inputs,
             input_key=input_key,
             constant_args=constant_args,
+            memory=memory,
             return_outputs=False,
         )
         # Nothing to iterate - the outputs were never asked for - but
@@ -227,7 +254,9 @@ class Session:
         raises. For a synchronous one-off, use
         [`for_each`][map_lambda.Session.for_each] with a single input.
         """
-        await self._require_native_session().invoke_detached(function_name, json.dumps(payload))
+        await self._require_native_session().invoke_detached(
+            function_name, json.dumps(payload), project=self.project
+        )
 
 
 async def map_unordered(
@@ -237,7 +266,9 @@ async def map_unordered(
     *,
     input_key: str,
     constant_args: dict[str, Any] | None = None,
+    memory: int | None = None,
     endpoint_url: str | None = None,
+    project: str | None = None,
     dispatchers: int | Literal["auto"] = "auto",
     concurrency: int = DEFAULT_CONCURRENCY,
     retries: int = 2,
@@ -263,6 +294,7 @@ async def map_unordered(
     """
     async with Session(
         endpoint_url=endpoint_url,
+        project=project,
         dispatchers=dispatchers,
         concurrency=concurrency,
         retries=retries,
@@ -275,6 +307,7 @@ async def map_unordered(
             inputs,
             input_key=input_key,
             constant_args=constant_args,
+            memory=memory,
         ):
             yield output
 
@@ -286,7 +319,9 @@ async def for_each(
     *,
     input_key: str,
     constant_args: dict[str, Any] | None = None,
+    memory: int | None = None,
     endpoint_url: str | None = None,
+    project: str | None = None,
     dispatchers: int | Literal["auto"] = "auto",
     concurrency: int = DEFAULT_CONCURRENCY,
     retries: int = 2,
@@ -303,6 +338,7 @@ async def for_each(
     """
     async with Session(
         endpoint_url=endpoint_url,
+        project=project,
         dispatchers=dispatchers,
         concurrency=concurrency,
         retries=retries,
@@ -315,4 +351,5 @@ async def for_each(
             inputs,
             input_key=input_key,
             constant_args=constant_args,
+            memory=memory,
         )

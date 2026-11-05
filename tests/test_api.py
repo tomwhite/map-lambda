@@ -73,6 +73,49 @@ def test_map_passes_the_template_and_the_session_settings_through():
     assert request["max_in_flight"] == 6
 
 
+def test_a_project_prefixes_the_dispatcher_and_the_worker():
+    invoker = RecordingInvoker([dispatcher_summary(1)])
+
+    mapped(_session(invoker, project="proj"), "copy", [1], input_key="i")
+
+    assert invoker.dispatched_to == ["proj-dispatcher"]
+    assert invoker.payloads[0]["worker_function"] == "proj-copy"
+
+
+def test_a_memory_size_names_the_worker_deployed_at_it():
+    invoker = RecordingInvoker([dispatcher_summary(1), dispatcher_summary(1)])
+    session = _session(invoker, project="proj")
+
+    mapped(session, "copy", [1], input_key="i", memory=3538)
+    asyncio.run(session.for_each("copy", [1], input_key="i", memory=1024))
+
+    assert [r["worker_function"] for r in invoker.payloads] == ["proj-copy-3538", "proj-copy-1024"]
+
+
+def test_without_a_project_the_names_are_used_as_they_are():
+    invoker = RecordingInvoker([dispatcher_summary(1)])
+
+    mapped(_session(invoker), "copy", [1], input_key="i")
+
+    assert invoker.dispatched_to == ["dispatcher"]
+    assert invoker.payloads[0]["worker_function"] == "copy"
+
+
+def test_a_session_gives_the_names_its_calls_invoke():
+    session = api.Session(project="proj")
+
+    assert session.function_name("copy") == "proj-copy"
+    assert session.function_name("copy", memory=3538) == "proj-copy-3538"
+    assert session.function_name(api.DISPATCHER) == "proj-dispatcher"
+    assert api.Session().function_name("copy", memory=3538) == "copy-3538"
+
+
+def test_a_local_session_gives_the_plain_names():
+    session = api.Session(endpoint_url=api.LOCAL_ENDPOINT_URL, project="proj")
+
+    assert session.function_name("copy", memory=3538) == "copy"
+
+
 def test_a_list_input_is_sent_whole_as_one_input():
     """However many items a worker reads out of it."""
     invoker = RecordingInvoker([dispatcher_summary(2)])
@@ -217,6 +260,14 @@ def test_invoke_dispatches_once_without_waiting_for_the_answer():
     assert invoker.invoked == [("delete-scratch", {"store": "s3://bucket/scratch"})]
     # not dispatch: no partition went out
     assert invoker.payloads == []
+
+
+def test_invoke_prefixes_the_function_with_the_project():
+    invoker = RecordingInvoker()
+
+    asyncio.run(_session(invoker, project="proj").invoke_detached("delete-scratch"))
+
+    assert invoker.invoked == [("proj-delete-scratch", {})]
 
 
 def test_invoke_is_not_counted_as_a_call():
