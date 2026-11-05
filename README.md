@@ -119,63 +119,30 @@ What is not guaranteed by the framework.
 ## Deployment
 
 <!-- --8<-- [start:deployment] -->
-There are two functions to deploy: your worker, and the dispatcher from this repo. Each is an ordinary Lambda, deployed with [cargo lambda](https://www.cargo-lambda.info/). The examples below deploy `echo` - a simple function that returns its input - substitute your own worker's crate name.
+An application deploys its workers and dispatcher in one CloudFormation stack, named after the project, holding the functions, their IAM roles and their log groups.
 
-### 1. IAM roles
+The examples below deploy map-lambda's own project, which is the dispatcher and `echo` - a simple function that returns its input.
 
-The worker and the dispatcher need different permissions, so they get a role each.
+### Deploying
+
+Deploying needs the `deploy` extra (`map-lambda[deploy]`), and building from source needs Rust, [Zig](https://ziglang.org/) and [cargo lambda](https://www.cargo-lambda.info/). AWS credentials and the region are found is the same way as the `aws` CLI, and `--region` overrides the region.
 
 ```shell
-# Roles Lambda can assume, with permission to write logs
-for role in map-lambda-worker-role map-lambda-dispatcher-role; do
-  aws iam create-role --role-name $role \
-    --assume-role-policy-document file://aws/trust-policy.json >/dev/null
-  aws iam attach-role-policy --role-name $role \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole >/dev/null
-done
-
-# ...and the dispatcher may invoke this project's workers
-aws iam put-role-policy --role-name map-lambda-dispatcher-role \
-  --policy-name invoke-map-lambda-workers \
-  --policy-document file://aws/invoke-map-lambda-workers.json >/dev/null
+uv run python -m map_lambda.deploy deploy --from-source
 ```
 
-A worker that reads or writes S3 needs its own policy on `map-lambda-worker-role` as well. `echo` does not; worker roles are per project and shared with nobody.
+This builds the zips, lists everything it will change - then asks for confirmation before creating the CloudFormation stack.
 
-### 2. Build and deploy
+### Seeing what is deployed
 
 ```shell
-cd rust
-cargo lambda build --release --arm64 --package echo --package map-lambda-dispatcher
-
-# --role takes an ARN rather than a name, so ask IAM for it
-worker_role=$(aws iam get-role --role-name map-lambda-worker-role --query Role.Arn --output text)
-dispatcher_role=$(aws iam get-role --role-name map-lambda-dispatcher-role --query Role.Arn --output text)
-
-cargo lambda deploy --binary-name echo --role "$worker_role" echo
-cargo lambda deploy --binary-name dispatcher --role "$dispatcher_role" dispatcher
+uv run python -m map_lambda.deploy list
 ```
 
-### 3. Tearing it down
-
-Delete the logs (which are billed for storage):
+### Deleting it
 
 ```shell
-aws logs delete-log-group --log-group-name /aws/lambda/echo
-aws logs delete-log-group --log-group-name /aws/lambda/dispatcher
-```
-
-The functions and roles should only be deleted if you don't need to run them again.
-
-```shell
-aws lambda delete-function --function-name echo
-aws lambda delete-function --function-name dispatcher
-
-for role in map-lambda-worker-role map-lambda-dispatcher-role; do
-  aws iam detach-role-policy --role-name $role \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-  aws iam delete-role --role-name $role
-done
+uv run python -m map_lambda.deploy delete
 ```
 
 <!-- --8<-- [end:deployment] -->

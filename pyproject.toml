@@ -11,6 +11,13 @@ dependencies = []
 diagnostics = [
     "matplotlib>=3.9",
 ]
+deploy = [
+    "boto3>=1.35",
+    "click>=8.1",
+]
+
+[project.scripts]
+map-lambda-deploy = "map_lambda.deploy:main"
 
 [build-system]
 requires = ["maturin>=1.9,<2"]
@@ -62,12 +69,12 @@ warn_unused_ignores = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["matplotlib.*"]
+module = ["matplotlib.*", "boto3.*"]
 ignore_missing_imports = true
 
 [dependency-groups]
 dev = [
-    "map-lambda[diagnostics]",
+    "map-lambda[diagnostics,deploy]",
     "mypy>=2.3.1",
     "obstore>=0.11.1",
     "pytest>=9.1.1",

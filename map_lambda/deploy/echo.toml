@@ -1,0 +1,9 @@
+# map-lambda's own project: the dispatcher and echo, for trying a deployment out.
+workspace = "../../rust"
+
+[dispatcher]
+package = "map-lambda-dispatcher"
+
+[functions.echo]
+memory = 512
+timeout = 60
