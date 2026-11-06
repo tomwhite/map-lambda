@@ -14,6 +14,7 @@ use std::sync::Mutex;
 pub struct Stub {
     bodies: Mutex<VecDeque<UnboundedReceiver<Vec<u8>>>>,
     requests: Mutex<Vec<Vec<u8>>>,
+    dispatched_to: Mutex<Vec<String>>,
     invoked: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
@@ -32,6 +33,11 @@ impl Stub {
         self.requests.lock().expect("unpoisoned").clone()
     }
 
+    /// The function each dispatcher request went to, in the same order.
+    pub fn dispatched_to(&self) -> Vec<String> {
+        self.dispatched_to.lock().expect("unpoisoned").clone()
+    }
+
     /// Every fire-and-forget invocation, as `(function_name, payload)`.
     pub fn invoked(&self) -> Vec<(String, Vec<u8>)> {
         self.invoked.lock().expect("unpoisoned").clone()
@@ -41,10 +47,14 @@ impl Stub {
 impl Invoker for Stub {
     fn invoke_streaming<'a>(
         &'a self,
-        _function_name: &'a str,
+        function_name: &'a str,
         payload: Vec<u8>,
     ) -> BoxFuture<'a, Result<Chunks, Error>> {
         self.requests.lock().expect("unpoisoned").push(payload);
+        self.dispatched_to
+            .lock()
+            .expect("unpoisoned")
+            .push(function_name.to_string());
         let body = self.bodies.lock().expect("unpoisoned").pop_front();
         Box::pin(async move {
             let body =

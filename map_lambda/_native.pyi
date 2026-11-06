@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any, final
 
 DEFAULT_CONCURRENCY: int
-DEFAULT_DISPATCHER_FUNCTION: str
+DISPATCHER: str
 LOCAL_ENDPOINT_URL: str
 STREAMS_PER_CONNECTION: int
 
@@ -14,6 +14,8 @@ class Stub:
     def respond(self) -> Body: ...
     @property
     def requests(self) -> list[str]: ...
+    @property
+    def dispatched_to(self) -> list[str]: ...
     @property
     def invocations(self) -> list[tuple[str, str]]: ...
 
@@ -44,15 +46,21 @@ class Session:
         worker_function: str,
         inputs: list[Any],
         *,
+        memory: int | None,
         input_key: str,
         constant_args: dict[str, Any],
-        dispatcher_function: str,
+        project: str | None,
         dispatchers: int | None,
         concurrency: int,
         retries: int,
         return_outputs: bool,
         return_stats: bool,
     ) -> Batches: ...
-    async def invoke_detached(self, function_name: str, payload: str) -> None: ...
+    async def invoke_detached(
+        self, function_name: str, payload: str, *, project: str | None
+    ) -> None: ...
 
 async def connect(endpoint_url: str | None = None) -> Invoker: ...
+def function_name(
+    name: str, *, memory: int | None = None, project: str | None = None, local: bool = False
+) -> str: ...

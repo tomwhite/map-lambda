@@ -13,7 +13,7 @@
 use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
 use map_lambda_client::{
-    testing, Error, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION, LOCAL_ENDPOINT_URL,
+    testing, Error, Worker, DEFAULT_CONCURRENCY, DISPATCHER, LOCAL_ENDPOINT_URL,
 };
 use map_lambda_protocol::STREAMS_PER_CONNECTION;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError};
@@ -45,7 +45,7 @@ impl Session {
     /// Inputs and constant args go through `json.dumps`, so they are
     /// marshalled exactly as they always were.
     #[pyo3(signature = (
-        worker_function, inputs, *, input_key, constant_args, dispatcher_function, dispatchers,
+        worker_function, inputs, *, memory, input_key, constant_args, project, dispatchers,
         concurrency, retries, return_outputs, return_stats,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -53,9 +53,10 @@ impl Session {
         &self,
         worker_function: &str,
         inputs: &Bound<'_, PyAny>,
+        memory: Option<u32>,
         input_key: &str,
         constant_args: &Bound<'_, PyAny>,
-        dispatcher_function: String,
+        project: Option<String>,
         dispatchers: Option<usize>,
         concurrency: usize,
         retries: usize,
@@ -75,15 +76,19 @@ impl Session {
 
         let mut session = self.0.lock().expect("unpoisoned");
         let settings = session.settings_mut();
-        settings.dispatcher_function = dispatcher_function;
+        settings.project = project;
         settings.dispatchers = dispatchers;
         settings.concurrency = concurrency;
         settings.retries = retries;
         settings.return_stats = return_stats;
+        let mut worker = Worker::new(worker_function);
+        if let Some(memory) = memory {
+            worker = worker.memory(memory);
+        }
         let batches = if return_outputs {
-            session.map_unordered(worker_function, inputs, input_key, constant_args)
+            session.map_unordered(worker, inputs, input_key, constant_args)
         } else {
-            session.for_each(worker_function, inputs, input_key, constant_args)
+            session.for_each(worker, inputs, input_key, constant_args)
         };
         Ok(Batches {
             batches: Arc::new(Mutex::new(Some(batches.map_err(to_py)?))),
@@ -91,17 +96,17 @@ impl Session {
     }
 
     /// Invoke `function_name` once with `payload` and do not wait for it to run.
+    #[pyo3(signature = (function_name, payload, *, project))]
     fn invoke_detached<'py>(
         &self,
         py: Python<'py>,
         function_name: String,
         payload: String,
+        project: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let invoked = self
-            .0
-            .lock()
-            .expect("unpoisoned")
-            .invoke_detached(&function_name, payload.into_bytes());
+        let mut session = self.0.lock().expect("unpoisoned");
+        session.settings_mut().project = project;
+        let invoked = session.invoke_detached(function_name, payload.into_bytes());
         future_into_py(py, async move { invoked.await.map_err(to_py) })
     }
 }
@@ -206,6 +211,12 @@ impl Stub {
             .collect()
     }
 
+    /// The function each dispatcher request went to.
+    #[getter]
+    fn dispatched_to(&self) -> Vec<String> {
+        self.0.dispatched_to()
+    }
+
     /// Every `invoke_detached`, as `(function_name, payload)`.
     #[getter]
     fn invocations(&self) -> Vec<(String, String)> {
@@ -252,8 +263,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Session>()?;
     m.add_class::<Stub>()?;
     m.add_function(wrap_pyfunction!(connect, m)?)?;
+    m.add_function(wrap_pyfunction!(function_name, m)?)?;
     m.add("DEFAULT_CONCURRENCY", DEFAULT_CONCURRENCY)?;
-    m.add("DEFAULT_DISPATCHER_FUNCTION", DEFAULT_DISPATCHER_FUNCTION)?;
+    m.add("DISPATCHER", DISPATCHER)?;
     m.add("LOCAL_ENDPOINT_URL", LOCAL_ENDPOINT_URL)?;
     m.add("STREAMS_PER_CONNECTION", STREAMS_PER_CONNECTION)?;
     Ok(())
@@ -269,6 +281,22 @@ fn connect(py: Python<'_>, endpoint_url: Option<String>) -> PyResult<Bound<'_, P
             map_lambda_client::connect(endpoint_url.as_deref()).await,
         ))
     })
+}
+
+/// The name a function is deployed under, as a session calls it.
+#[pyfunction]
+#[pyo3(signature = (name, *, memory=None, project=None, local=false))]
+fn function_name(
+    name: String,
+    memory: Option<u32>,
+    project: Option<String>,
+    local: bool,
+) -> String {
+    let mut worker = Worker::new(name);
+    if let Some(memory) = memory {
+        worker = worker.memory(memory);
+    }
+    map_lambda_client::function_name(&worker, project.as_deref(), local)
 }
 
 fn invoker_of(invoker: &Bound<'_, PyAny>) -> PyResult<Arc<dyn map_lambda_client::Invoker>> {

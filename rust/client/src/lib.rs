@@ -47,4 +47,4 @@ pub mod testing;
 pub use call::{Batch, Batches, DispatcherStats, InvocationStats, Record};
 pub use error::Error;
 pub use invoker::{connect, Chunks, Invoker, LOCAL_ENDPOINT_URL};
-pub use session::{Session, Settings, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_FUNCTION};
+pub use session::{function_name, Session, Settings, Worker, DEFAULT_CONCURRENCY, DISPATCHER};

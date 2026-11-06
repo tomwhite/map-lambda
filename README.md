@@ -87,6 +87,8 @@ Inputs and outputs are sent as JSON, so they must be JSON-serialisable (e.g. Pyt
 
 There is also a `for_each` function, which takes exactly the same arguments as `map_unordered` but doesn't return any values. The return type of the Rust `function_handler` in this case should be `Result<(), Error>` to indicate an empty response.
 
+Functions deployed for a **project** have its name as a prefix, so two projects can each have a worker called `copy` without clashing. If memory is specified then it forms part of the function name too, so a call to `map_unordered("square", ..., project="math", memory=1024)` calls the lambda function `math-square-1024`.
+
 Map-lambda provides **diagnostics** in the form of progress updates as the `map_unordered` (or `for_each`) call runs, dispatcher and worker invocation stats at the end of the run, and way to visualise the invocations over time. See the API doc and/or examples for details.
 
 ## Failures and retries
@@ -191,7 +193,7 @@ In the `rust/` directory:
 
 `cargo test` runs the Rust unit tests for every crate in the workspace.
 
-`cargo lambda watch` runs a local server at `http://localhost:9000` serving *every* lambda crate at once, routed by function name in the URL, rebuilding on file changes.
+`cargo lambda watch` runs a local server at `http://localhost:9000` serving *every* lambda crate at once, routed by function name in the URL, rebuilding on file changes. It serves each function under its binary's name, so a session using it never prefixes names with a project.
 
 To invoke a worker manually, use `cargo lambda` or `curl` directly:
 

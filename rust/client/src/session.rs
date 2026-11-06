@@ -8,8 +8,8 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// The name the dispatcher is deployed under, by default.
-pub const DEFAULT_DISPATCHER_FUNCTION: &str = "dispatcher";
+/// The dispatcher's name, before a [`Settings::project`] prefix.
+pub const DISPATCHER: &str = "dispatcher";
 
 /// Worker invocations in flight per call, by default.
 pub const DEFAULT_CONCURRENCY: usize = 100;
@@ -53,49 +53,56 @@ impl Session {
         &mut self.settings
     }
 
-    /// Invoke `worker_function` once per input, with `constant_args` and the
-    /// input under `input_key`, streaming back batches of outputs in the
-    /// order they finished.
+    /// Invoke `worker` once per input, with `constant_args` and the input
+    /// under `input_key`, streaming back batches of outputs in the order
+    /// they finished.
     ///
     /// Refuses, with nothing invoked, a call that could not work. Dropping
     /// the stream closes the dispatchers' streams, but Lambda does not tell
     /// them, so each still runs the rest of its partition.
     pub fn map_unordered(
         &self,
-        worker_function: &str,
+        worker: impl Into<Worker>,
         inputs: Vec<Value>,
         input_key: &str,
         constant_args: Map<String, Value>,
     ) -> Result<Batches, Error> {
-        self.start(worker_function, inputs, input_key, constant_args, true)
+        self.start(worker.into(), inputs, input_key, constant_args, true)
     }
 
     /// [`map_unordered`](Self::map_unordered), with no outputs sent back.
     pub fn for_each(
         &self,
-        worker_function: &str,
+        worker: impl Into<Worker>,
         inputs: Vec<Value>,
         input_key: &str,
         constant_args: Map<String, Value>,
     ) -> Result<Batches, Error> {
-        self.start(worker_function, inputs, input_key, constant_args, false)
+        self.start(worker.into(), inputs, input_key, constant_args, false)
     }
 
-    /// Invoke `function_name` once with `payload`, without waiting for it to
-    /// run.
+    /// Invoke `function` once with `payload`, without waiting for it to run.
     pub fn invoke_detached(
         &self,
-        function_name: &str,
+        function: impl Into<Worker>,
         payload: Vec<u8>,
     ) -> impl Future<Output = Result<(), Error>> + Send + 'static {
         let invoker = self.invoker.clone();
-        let function_name = function_name.to_string();
+        let function_name = self.function_name(&function.into());
         async move { invoker.invoke_detached(&function_name, payload).await }
+    }
+
+    fn function_name(&self, worker: &Worker) -> String {
+        function_name(
+            worker,
+            self.settings.project.as_deref(),
+            self.endpoint_url.is_some(),
+        )
     }
 
     fn start(
         &self,
-        worker_function: &str,
+        worker: Worker,
         inputs: Vec<Value>,
         input_key: &str,
         constant_args: Map<String, Value>,
@@ -103,8 +110,8 @@ impl Session {
     ) -> Result<Batches, Error> {
         let settings = &self.settings;
         let call = Call {
-            dispatcher_function: settings.dispatcher_function.clone(),
-            worker_function: worker_function.to_string(),
+            dispatcher_function: self.function_name(&Worker::from(DISPATCHER)),
+            worker_function: self.function_name(&worker),
             input_key: input_key.to_string(),
             constant_args,
             dispatchers: settings.dispatchers,
@@ -119,6 +126,72 @@ impl Session {
     }
 }
 
+/// The name `worker` is deployed under: prefixed with the project and
+/// suffixed with the memory size on AWS, and plain when `local`, as `cargo
+/// lambda watch` serves each function under its binary's name.
+pub fn function_name(worker: &Worker, project: Option<&str>, local: bool) -> String {
+    if local {
+        return worker.name.clone();
+    }
+    let mut name = match project {
+        Some(project) => format!("{project}-{}", worker.name),
+        None => worker.name.clone(),
+    };
+    if let Some(memory) = worker.memory {
+        name = format!("{name}-{memory}");
+    }
+    name
+}
+
+/// A function to call, by the name its project gave it, and optionally one
+/// of the memory sizes it was deployed at.
+///
+/// ```
+/// use map_lambda_client::Worker;
+///
+/// let default_size: Worker = "copy".into();
+/// let bigger = Worker::new("copy").memory(3538);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worker {
+    name: String,
+    memory: Option<u32>,
+}
+
+impl Worker {
+    /// `name` at its default memory size.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            memory: None,
+        }
+    }
+
+    /// The worker deployed at `memory` MB.
+    pub fn memory(mut self, memory: u32) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+}
+
+impl From<&str> for Worker {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for Worker {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<&String> for Worker {
+    fn from(name: &String) -> Self {
+        Self::new(name.as_str())
+    }
+}
+
 /// How the calls through a [`Session`] run.
 ///
 /// ```
@@ -128,8 +201,11 @@ impl Session {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Settings {
-    /// The name the dispatcher is deployed under.
-    pub dispatcher_function: String,
+    /// The project the functions were deployed as, which prefixes every
+    /// name on AWS: the dispatcher becomes `<project>-dispatcher`, and a
+    /// worker `copy` becomes `<project>-copy`. `None` uses the names as
+    /// they are.
+    pub project: Option<String>,
     /// How many dispatchers a call's inputs are partitioned across, or
     /// `None` for the fewest that respect Lambda's limits.
     pub dispatchers: Option<usize>,
@@ -144,7 +220,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            dispatcher_function: DEFAULT_DISPATCHER_FUNCTION.to_string(),
+            project: None,
             dispatchers: None,
             concurrency: DEFAULT_CONCURRENCY,
             retries: 2,
@@ -155,7 +231,7 @@ impl Default for Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, Settings};
+    use super::{Session, Settings, Worker};
     use crate::testing::Stub;
     use crate::Error;
     use futures::executor::block_on;
@@ -264,6 +340,86 @@ mod tests {
         assert_eq!(request["retries"], 5);
         assert_eq!(request["return_stats"], true);
         assert_eq!(request["endpoint_url"], "http://localhost:9000");
+    }
+
+    fn in_project(project: Option<&str>) -> Settings {
+        Settings {
+            project: project.map(str::to_string),
+            ..one_dispatcher()
+        }
+    }
+
+    /// The function each dispatcher invocation went to, and the worker
+    /// it was asked to invoke, for one call of `worker`.
+    fn names(endpoint_url: Option<&str>, settings: Settings, worker: Worker) -> (String, String) {
+        let stub = responding(1);
+        let session =
+            Session::new(stub.clone(), endpoint_url.map(str::to_string)).with_settings(settings);
+        block_on(
+            session
+                .for_each(worker, vec![json!(0)], "i", Map::new())
+                .expect("starts")
+                .finish(),
+        )
+        .expect("clean");
+        let worker = requests(&stub)[0]["worker_function"]
+            .as_str()
+            .expect("named")
+            .to_string();
+        (stub.dispatched_to().remove(0), worker)
+    }
+
+    #[test]
+    fn without_a_project_names_are_used_as_they_are() {
+        assert_eq!(
+            names(None, in_project(None), "copy".into()),
+            ("dispatcher".into(), "copy".into())
+        );
+    }
+
+    #[test]
+    fn a_project_prefixes_the_dispatcher_and_the_worker() {
+        assert_eq!(
+            names(None, in_project(Some("proj")), "copy".into()),
+            ("proj-dispatcher".into(), "proj-copy".into())
+        );
+    }
+
+    #[test]
+    fn a_memory_size_suffixes_the_worker_alone() {
+        assert_eq!(
+            names(
+                None,
+                in_project(Some("proj")),
+                Worker::new("copy").memory(3538)
+            ),
+            ("proj-dispatcher".into(), "proj-copy-3538".into())
+        );
+    }
+
+    /// `cargo lambda watch` serves each function under its binary's name.
+    #[test]
+    fn a_local_run_uses_the_plain_names() {
+        let local = Some("http://localhost:9000");
+        assert_eq!(
+            names(
+                local,
+                in_project(Some("proj")),
+                Worker::new("copy").memory(3538)
+            ),
+            ("dispatcher".into(), "copy".into())
+        );
+    }
+
+    #[test]
+    fn a_detached_invocation_is_named_the_same_way() {
+        let stub = Arc::new(Stub::default());
+        let session = Session::new(stub.clone(), None).with_settings(in_project(Some("proj")));
+        let name = String::from("copy");
+
+        block_on(session.invoke_detached(&name, Vec::new())).expect("submitted");
+
+        assert_eq!(stub.invoked()[0].0, "proj-copy");
     }
 
     /// Nothing streamed back to be dropped on arrival.

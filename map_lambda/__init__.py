@@ -32,10 +32,18 @@ The public API also includes utilities for analysing stats:
 * `timeline.generate_timeline` - a chart of invocation stats.
 """
 
-from .api import DEFAULT_CONCURRENCY, LOCAL_ENDPOINT_URL, Session, for_each, map_unordered
+from .api import (
+    DEFAULT_CONCURRENCY,
+    DISPATCHER,
+    LOCAL_ENDPOINT_URL,
+    Session,
+    for_each,
+    map_unordered,
+)
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "DISPATCHER",
     "LOCAL_ENDPOINT_URL",
     "Session",
     "for_each",
