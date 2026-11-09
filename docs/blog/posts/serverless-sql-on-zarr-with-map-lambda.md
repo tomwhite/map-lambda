@@ -19,7 +19,7 @@ For the last couple of years, Alex Merose and others have been exploring the ide
 
 ### The results
 
-Before looking at how it works, here are the headline results from the [benchmarks](https://github.com/tomwhite/datafusion-lambda-benchmarks) I ran:
+Before looking at how it works, here are the headline results from the [benchmarks](https://github.com/tomwhite/zarr-datafusion-lambda) I ran:
 
 **The monthly area-weighted global mean temperature over 85 years of hourly
 ERA5 (745,128 chunks, 3.1 TB uncompressed) takes ~88s and costs ~$2.17**
@@ -71,7 +71,7 @@ COPY (
 ) TO 's3://<bucket>/climatology.zarr' STORED AS ZARR OPTIONS ('chunks' '24,12,12')
 ```
 
-More details and all the code used to run the benchmarks are available in the [datafusion-lambda-benchmarks repo](https://github.com/tomwhite/datafusion-lambda-benchmarks).
+More details and all the code used to run the benchmarks are available in the [zarr-datafusion-lambda repo](https://github.com/tomwhite/zarr-datafusion-lambda).
 
 ### What's next?
 
