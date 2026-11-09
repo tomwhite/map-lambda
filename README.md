@@ -121,7 +121,7 @@ What is not guaranteed by the framework.
 <!-- --8<-- [start:deployment] -->
 An application deploys its workers and dispatcher in one CloudFormation stack, named after the project, holding the functions, their IAM roles and their log groups.
 
-The examples below deploy map-lambda's own project, which is the dispatcher and `echo` - a simple function that returns its input.
+The examples below deploy map-lambda's own project, which is the dispatcher and `echo` - a simple example function that returns its input.
 
 ### Deploying
 
@@ -132,6 +132,8 @@ uv run python -m map_lambda.deploy deploy --from-source
 ```
 
 This builds the zips, lists everything it will change - then asks for confirmation before creating the CloudFormation stack.
+
+Without `--from-source`, `deploy` downloads the zips from the GitHub release matching the installed version.
 
 ### Seeing what is deployed
 
@@ -172,6 +174,10 @@ curl -X POST \
   http://localhost:9000/2015-03-31/functions/echo/invocations \
   -d '{"i":1,"default_sleep":0.0}'
 ```
+
+### Releasing
+
+Set the version in `pyproject.toml` (`0.1.0.devN` for now), run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0.dev1`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev version.
 
 <!-- --8<-- [end:development] -->
 

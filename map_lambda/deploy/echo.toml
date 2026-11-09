@@ -1,5 +1,6 @@
 # map-lambda's own project: the dispatcher and echo, for trying a deployment out.
 workspace = "../../rust"
+release_url = "https://github.com/tomwhite/map-lambda/releases/download/v{version}"
 
 [dispatcher]
 package = "map-lambda-dispatcher"

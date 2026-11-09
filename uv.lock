@@ -634,7 +634,7 @@ wheels = [
 
 [[package]]
 name = "map-lambda"
-version = "0.1.0"
+version = "0.1.0.dev1"
 source = { editable = "." }
 
 [package.optional-dependencies]

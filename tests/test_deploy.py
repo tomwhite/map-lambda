@@ -3,6 +3,8 @@ Deploying: reading a spec, the template it makes, naming zips by their contents,
 change-set flow, deleting and listing, against stubbed AWS clients.
 """
 
+import dataclasses
+import importlib.metadata
 import json
 import zipfile
 from collections.abc import Iterator
@@ -21,7 +23,7 @@ from click.testing import CliRunner
 
 import map_lambda
 import map_lambda.deploy
-from map_lambda.deploy import aws, build, cli, spec, template
+from map_lambda.deploy import aws, build, cli, release, spec, template
 from map_lambda.deploy.aws import DeployError
 from map_lambda.deploy.spec import SpecError
 
@@ -918,13 +920,94 @@ def test_an_application_adds_the_commands_to_its_own_cli_with_its_spec(monkeypat
     assert calls == [
         ("app", None, {"yes": True, "from_source": True, "allow": ("a", "b"), "dry_run": False})
     ]
-    assert set(app.commands) == {"deploy", "delete", "list", "allow-bucket"}
+    assert set(app.commands) == {"deploy", "delete", "list", "allow-bucket", "build"}
 
 
-def test_a_failure_is_one_line_saying_why(monkeypatch):
-    result = CliRunner().invoke(cli.group(), ["deploy"])
+def test_a_failure_is_one_line_saying_why(tmp_path):
+    spec_path = tmp_path / "deploy.toml"
+    spec_path.write_text('project = "app"\n[functions.work]\nmemory = 1024\n')
+
+    result = CliRunner().invoke(cli.group(), ["--spec", str(spec_path), "deploy"])
 
     assert result.exit_code == 1
-    assert result.output == (
-        "Error: release zips aren't published yet: deploy with --from-source\n"
+    assert result.output == "Error: app has no release_url: deploy with --from-source\n"
+
+
+def test_the_echo_release_is_the_one_tagged_with_the_installed_version():
+    version = importlib.metadata.version("map-lambda")
+
+    assert release.url(spec.load(cli.ECHO_SPEC)) == (
+        f"https://github.com/tomwhite/map-lambda/releases/download/v{version}"
     )
+
+
+def test_a_release_url_with_anything_but_the_version_is_refused():
+    raw = {"project": "p", "release_url": "https://x/{tag}", "functions": {"w": {"memory": 1}}}
+
+    with pytest.raises(SpecError, match="release_url can only contain"):
+        spec.parse(raw, base=Path())
+
+
+def _released(tmp_path: Path) -> tuple[spec.Spec, dict[str, Path]]:
+    (tmp_path / "built").mkdir()
+    zips = _zips(tmp_path / "built")
+    project = dataclasses.replace(
+        _spec(),
+        release_url=tmp_path.as_uri() + "/v{version}",
+        distribution="map-lambda",
+        sums=tmp_path / "deploy.sha256",
+    )
+    release.write(project, zips, tmp_path / "v1.2")
+    (tmp_path / "download").mkdir()
+    return project, zips
+
+
+@pytest.fixture
+def version_1_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(release.importlib.metadata, "version", lambda _: "1.2")
+
+
+def test_a_release_build_writes_the_checksums_beside_the_spec():
+    assert spec.load(cli.ECHO_SPEC).sums == cli.ECHO_SPEC.with_suffix(".sha256")
+
+
+def test_a_deploy_downloads_the_zips_a_release_build_wrote(tmp_path, version_1_2, term):
+    project, built = _released(tmp_path)
+
+    zips = release.download(project, tmp_path / "download")
+
+    assert set(zips) == {"work", "dispatcher"}
+    for binary, path in zips.items():
+        assert path.read_bytes() == built[binary].read_bytes()
+    assert "Downloading work.zip ... done in 0s" in term.lines()
+
+
+def test_a_zip_the_install_wasnt_built_with_is_refused(tmp_path, version_1_2, term):
+    project, _ = _released(tmp_path)
+    (tmp_path / "v1.2" / "work.zip").write_bytes(b"tampered")
+
+    with pytest.raises(DeployError, match=r"work\.zip from .* isn't the one this install"):
+        release.download(project, tmp_path / "download")
+
+
+def test_a_missing_release_names_what_it_couldnt_download(tmp_path, monkeypatch, term):
+    project, _ = _released(tmp_path)
+    monkeypatch.setattr(release.importlib.metadata, "version", lambda _: "9.9")
+
+    with pytest.raises(DeployError, match=r"v9\.9/dispatcher\.zip"):
+        release.download(project, tmp_path / "download")
+
+
+def test_an_install_not_built_by_a_release_says_to_build_from_source(tmp_path, version_1_2):
+    project, _ = _released(tmp_path)
+    (tmp_path / "deploy.sha256").unlink()
+
+    with pytest.raises(SpecError, match="wasn't built by a release: deploy with --from-source"):
+        release.download(project, tmp_path / "download")
+
+
+def test_a_spec_outside_an_installed_package_has_no_release(tmp_path):
+    project = dataclasses.replace(_spec(), release_url="https://x/v{version}")
+
+    with pytest.raises(SpecError, match="outside an installed package"):
+        release.url(project)

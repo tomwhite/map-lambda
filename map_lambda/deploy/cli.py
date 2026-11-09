@@ -1,5 +1,5 @@
 """
-The `deploy`, `delete`, `list` and `allow-bucket` commands for a project's spec: run by
+The `deploy`, `delete`, `list`, `allow-bucket` and `build` commands for a project's spec: run by
 `main` from the project's own entry point, or added to its own click CLI from `commands`.
 """
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import click
 
-from . import aws, build, spec, template
+from . import aws, build, release, spec, template
 from .aws import DeployError, say
 from .spec import Spec, SpecError
 
@@ -59,7 +59,7 @@ def group(spec_path: Path | None = None) -> click.Group:
 
 def commands(spec_path: Path | None = None) -> list[click.Command]:
     """
-    `deploy`, `delete`, `list` and `allow-bucket` for the spec at `spec_path`, to add to
+    `deploy`, `delete`, `list`, `allow-bucket` and `build` for the spec at `spec_path`, to add to
     an application's own click group. Without one, the spec comes from `group`'s `--spec`.
     """
 
@@ -86,7 +86,10 @@ def commands(spec_path: Path | None = None) -> list[click.Command]:
     def deploy(
         from_source: bool, allow: tuple[str, ...], dry_run: bool, yes: bool, region: str | None
     ) -> None:
-        """Create or update the project's stack."""
+        """
+        Create or update the project's stack, with the zips from the release matching
+        the installed version.
+        """
         with _errors():
             _deploy(
                 project(),
@@ -122,7 +125,20 @@ def commands(spec_path: Path | None = None) -> list[click.Command]:
         with _errors():
             _allow_bucket(project(), resolved(region), bucket, remove=remove, yes=yes)
 
-    return [deploy, delete, list_, allow_bucket]
+    @click.command("build")
+    @click.argument("out", type=click.Path(file_okay=False, path_type=Path))
+    def build_(out: Path) -> None:
+        """
+        Build the zips a release attaches into OUT, and their checksums beside the spec,
+        for the release's wheels to carry.
+        """
+        with _errors(), tempfile.TemporaryDirectory(prefix="map-lambda-") as lambda_dir:
+            released = project()
+            zips = build.build(released, Path(lambda_dir))
+            for path in release.write(released, zips, out):
+                click.echo(path)
+
+    return [deploy, delete, list_, allow_bucket, build_]
 
 
 @contextmanager
@@ -144,10 +160,9 @@ def _deploy(
     allow: Sequence[str] = (),
     dry_run: bool = False,
 ) -> None:
-    if not from_source:
-        raise DeployError("release zips aren't published yet: deploy with --from-source")
     with tempfile.TemporaryDirectory(prefix="map-lambda-") as lambda_dir:
-        zips = build.build(project, Path(lambda_dir))
+        get = build.build if from_source else release.download
+        zips = get(project, Path(lambda_dir))
         keys = {
             binary: build.code_key(project.project, binary, path) for binary, path in zips.items()
         }
