@@ -10,7 +10,7 @@ import re
 import tomllib
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +76,15 @@ class Spec:
     """A region the project's data requires, which can't be overridden."""
     workspace: Path | None = None
     """The Cargo workspace a `--from-source` deploy builds."""
+    release_url: str | None = None
+    """Where a plain deploy downloads the zips from, with `{version}` for the release's."""
+    distribution: str | None = None
+    """The installed distribution holding the spec, whose version picks the release."""
+    sums: Path | None = None
+    """
+    Where a release build writes the zips' checksums, beside the spec so its wheel
+    carries them, for a plain deploy to check the release's zips against.
+    """
 
     @property
     def binaries(self) -> dict[str, str]:
@@ -87,7 +96,8 @@ def load(path: Path) -> Spec:
     """Read a spec file. `workspace` in it is relative to the file."""
     with open(path, "rb") as f:
         raw = tomllib.load(f)
-    return parse(raw, base=path.parent, distribution=distribution_of(path))
+    project = parse(raw, base=path.parent, distribution=distribution_of(path))
+    return replace(project, sums=path.with_suffix(".sha256"))
 
 
 def distribution_of(path: Path) -> str | None:
@@ -135,6 +145,12 @@ def parse(raw: dict[str, Any], base: Path, distribution: str | None = None) -> S
         raise SpecError(f"project {project!r} must be lowercase letters, digits and hyphens")
     region = _take(raw, "region", str)
     workspace = _take(raw, "workspace", str)
+    release_url = _take(raw, "release_url", str)
+    if release_url is not None:
+        try:
+            release_url.format(version="")
+        except (KeyError, IndexError, ValueError):
+            raise SpecError("release_url can only contain {version}") from None
     dispatcher = _function(
         DISPATCHER,
         _take(raw, "dispatcher", dict) or {},
@@ -163,6 +179,8 @@ def parse(raw: dict[str, Any], base: Path, distribution: str | None = None) -> S
         functions=tuple(functions),
         region=region,
         workspace=None if workspace is None else (base / workspace).resolve(),
+        release_url=release_url,
+        distribution=distribution,
     )
     for function in (spec.dispatcher, *spec.functions):
         for deployed, _ in function.deployed(project):

@@ -1,6 +1,6 @@
 [project]
 name = "map-lambda"
-version = "0.1.0"
+version = "0.1.0.dev1"
 authors = [
     { name = "Tom White", email = "tom.e.white@gmail.com" }
 ]
@@ -26,6 +26,8 @@ build-backend = "maturin"
 [tool.maturin]
 manifest-path = "rust/python/Cargo.toml"
 module-name = "map_lambda._native"
+# Gitignored, so only included when named.
+include = [{ path = "map_lambda/deploy/*.sha256", format = "wheel" }]
 
 [tool.uv]
 # Rebuild the extension when the Rust it is built from changes.

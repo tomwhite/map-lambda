@@ -12,3 +12,5 @@ htmlcov/
 rust/target/
 site/
 map_lambda/*.so
+# Written by a release build, for its wheels to carry.
+map_lambda/deploy/*.sha256
