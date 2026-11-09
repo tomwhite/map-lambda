@@ -123,29 +123,62 @@ An application deploys its workers and dispatcher in one CloudFormation stack, n
 
 The examples below deploy map-lambda's own project, which is the dispatcher and `echo` - a simple example function that returns its input.
 
-### Deploying
+Deploying needs AWS credentials and a region, which are found in the same way as the `aws` CLI. `--region` overrides the region.
 
-Deploying needs the `deploy` extra (`map-lambda[deploy]`), and building from source needs Rust, [Zig](https://ziglang.org/) and [cargo lambda](https://www.cargo-lambda.info/). AWS credentials and the region are found is the same way as the `aws` CLI, and `--region` overrides the region.
+### Deploying from a release
+
+This needs only [uv](https://docs.astral.sh/uv/), not Rust: the Python wheels and the lambda zips both come from a [GitHub release](https://github.com/tomwhite/map-lambda/releases).
 
 ```shell
-uv run python -m map_lambda.deploy deploy --from-source
+RELEASE=https://github.com/tomwhite/map-lambda/releases/expanded_assets/v0.1.0.dev1
+uvx --python 3.12 --from 'map-lambda[deploy]' --find-links $RELEASE map-lambda-deploy deploy
 ```
 
-This builds the zips, lists everything it will change - then asks for confirmation before creating the CloudFormation stack.
+This lists everything it will change, then asks for confirmation before creating the CloudFormation stack. `--python 3.12` is needed where the default Python is older, as it is in CloudShell.
 
-Without `--from-source`, `deploy` downloads the zips from the GitHub release matching the installed version.
+To check it works, run `echo` through the deployed dispatcher:
+
+```shell
+uv run --python 3.12 --no-project --with map-lambda --find-links $RELEASE python -c '
+import asyncio, map_lambda
+
+async def main():
+    async for index, output in map_lambda.map_unordered("echo", [1, 2, 3], input_key="i", project="map-lambda"):
+        print(index, output)
+
+asyncio.run(main())
+'
+```
+
+The same commands work in [AWS CloudShell](https://aws.amazon.com/cloudshell/), which has credentials and a region already set, once uv is installed:
+
+```shell
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+export UV_CACHE_DIR=/tmp/uv-cache   # CloudShell's home directory is limited to 1 GB
+```
 
 ### Seeing what is deployed
 
 ```shell
-uv run python -m map_lambda.deploy list
+uvx --python 3.12 --from 'map-lambda[deploy]' --find-links $RELEASE map-lambda-deploy list
 ```
 
 ### Deleting it
 
 ```shell
-uv run python -m map_lambda.deploy delete
+uvx --python 3.12 --from 'map-lambda[deploy]' --find-links $RELEASE map-lambda-deploy delete
 ```
+
+### Deploying from source
+
+From a checkout, building the zips needs Rust, [Zig](https://ziglang.org/) and [cargo lambda](https://www.cargo-lambda.info/):
+
+```shell
+uv run python -m map_lambda.deploy deploy --from-source
+```
+
+A plain `deploy` from a checkout refuses to use a release's zips, as they needn't match the checked-out code. `list` and `delete` work from a checkout as `uv run python -m map_lambda.deploy list` and `uv run python -m map_lambda.deploy delete`.
 
 <!-- --8<-- [end:deployment] -->
 
@@ -177,7 +210,7 @@ curl -X POST \
 
 ### Releasing
 
-Set the version in `pyproject.toml` (`0.1.0.devN` for now), run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0.dev1`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev version.
+Set the version in `pyproject.toml` (`0.1.0.devN` for now), run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0.dev1`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev version. Then update `RELEASE` under Deployment to the new tag.
 
 <!-- --8<-- [end:development] -->
 
