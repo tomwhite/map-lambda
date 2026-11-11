@@ -127,11 +127,10 @@ Deploying needs AWS credentials and a region, which are found in the same way as
 
 ### Deploying from a release
 
-This needs only [uv](https://docs.astral.sh/uv/), not Rust: the Python wheels and the lambda zips both come from a [GitHub release](https://github.com/tomwhite/map-lambda/releases).
+This needs only [uv](https://docs.astral.sh/uv/), not Rust: the Python wheels come from [PyPI](https://pypi.org/project/map-lambda/), and the lambda zips from the matching [GitHub release](https://github.com/tomwhite/map-lambda/releases).
 
 ```shell
-RELEASE=https://github.com/tomwhite/map-lambda/releases/expanded_assets/v0.1.0.dev1
-uvx --python 3.12 --from 'map-lambda[deploy]' --find-links $RELEASE map-lambda-deploy deploy
+uvx --python 3.12 --from 'map-lambda[deploy]' map-lambda-deploy deploy
 ```
 
 This lists everything it will change, then asks for confirmation before creating the CloudFormation stack. `--python 3.12` is needed where the default Python is older, as it is in CloudShell.
@@ -139,7 +138,7 @@ This lists everything it will change, then asks for confirmation before creating
 To check it works, run `echo` through the deployed dispatcher:
 
 ```shell
-uv run --python 3.12 --no-project --with map-lambda --find-links $RELEASE python -c '
+uv run --python 3.12 --no-project --with map-lambda python -c '
 import asyncio, map_lambda
 
 async def main():
@@ -161,13 +160,13 @@ export UV_CACHE_DIR=/tmp/uv-cache   # CloudShell's home directory is limited to 
 ### Seeing what is deployed
 
 ```shell
-uvx --python 3.12 --from 'map-lambda[deploy]' --find-links $RELEASE map-lambda-deploy list
+uvx --python 3.12 --from 'map-lambda[deploy]' map-lambda-deploy list
 ```
 
 ### Deleting it
 
 ```shell
-uvx --python 3.12 --from 'map-lambda[deploy]' --find-links $RELEASE map-lambda-deploy delete
+uvx --python 3.12 --from 'map-lambda[deploy]' map-lambda-deploy delete
 ```
 
 ### Deploying from source
@@ -210,7 +209,7 @@ curl -X POST \
 
 ### Releasing
 
-Set the version in `pyproject.toml` (`0.1.0.devN` for now), run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0.dev1`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev version. Then update `RELEASE` under Deployment to the new tag.
+Set the version in `pyproject.toml`, run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev, alpha, beta or release candidate version. Finally it publishes the wheels to PyPI, by [trusted publishing](https://docs.pypi.org/trusted-publishers/) from the `pypi` environment. A version can't be uploaded to PyPI twice, even once deleted.
 
 <!-- --8<-- [end:development] -->
 

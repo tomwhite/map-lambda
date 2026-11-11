@@ -1,12 +1,23 @@
 [project]
 name = "map-lambda"
-version = "0.1.0.dev1"
+version = "0.1.0"
 authors = [
     { name = "Tom White", email = "tom.e.white@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = []
 description = "Fan out a Rust function to a thousand AWS Lambdas from Python in about a second."
+readme = "README.md"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+]
+
+[project.urls]
+Documentation = "https://tomwhite.github.io/map-lambda/"
+Repository = "https://github.com/tomwhite/map-lambda"
 
 [project.optional-dependencies]
 diagnostics = [
