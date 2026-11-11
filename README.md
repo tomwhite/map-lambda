@@ -1,7 +1,7 @@
 # Map-lambda
 
 <!-- --8<-- [start:intro] -->
-A highly-scalable parallel Python map function running on Rust AWS lambdas.
+Fan out a Rust function to a thousand AWS Lambdas from Python in about a second.
 
 The framework imposes very little overhead for latency:
 

@@ -6,6 +6,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = []
+description = "Fan out a Rust function to a thousand AWS Lambdas from Python in about a second."
 
 [project.optional-dependencies]
 diagnostics = [
