@@ -71,7 +71,12 @@ class Spec:
     the installed distribution whose package holds the spec.
     """
     dispatcher: Function
+    """The regular dispatcher, for calls that don't combine."""
     functions: tuple[Function, ...]
+    combiners: tuple[Function, ...] = ()
+    """
+    Combining dispatchers, one for each combiner, each named `dispatcher-<combiner>`.
+    """
     region: str | None = None
     """A region the project's data requires, which can't be overridden."""
     workspace: Path | None = None
@@ -89,7 +94,11 @@ class Spec:
     @property
     def binaries(self) -> dict[str, str]:
         """Each binary to build, with its package."""
-        return {f.binary: f.package for f in (self.dispatcher, *self.functions)}
+        return {f.binary: f.package for f in (*self.dispatchers, *self.functions)}
+
+    @property
+    def dispatchers(self) -> tuple[Function, ...]:
+        return (self.dispatcher, *self.combiners)
 
 
 def load(path: Path) -> Spec:
@@ -151,16 +160,30 @@ def parse(raw: dict[str, Any], base: Path, distribution: str | None = None) -> S
             release_url.format(version="")
         except (KeyError, IndexError, ValueError):
             raise SpecError("release_url can only contain {version}") from None
-    dispatcher = _function(
+    dispatcher = _dispatcher(
         DISPATCHER,
         _take(raw, "dispatcher", dict) or {},
+        where=DISPATCHER,
         default_package=DISPATCHER,
+        default_binary=DISPATCHER,
         default_memory=3538,
     )
-    if dispatcher.sizes:
-        raise SpecError("the dispatcher takes one memory size")
-    if dispatcher.bucket_access:
-        raise SpecError("the dispatcher can't have bucket_access: only workers touch data")
+    combiners = []
+    for combiner, table in (_take(raw, "combiners", dict) or {}).items():
+        if not isinstance(table, dict):
+            raise SpecError(f"combiners.{combiner} must be a table")
+        name = f"{DISPATCHER}-{combiner}"
+        combiners.append(
+            _dispatcher(
+                name,
+                table,
+                where=f"combiners.{combiner}",
+                default_package=name,
+                default_binary=name,
+                default_memory=dispatcher.memory,
+                default_timeout=dispatcher.timeout,
+            )
+        )
 
     functions = []
     for name, table in (_take(raw, "functions", dict) or {}).items():
@@ -177,12 +200,13 @@ def parse(raw: dict[str, Any], base: Path, distribution: str | None = None) -> S
         project=project,
         dispatcher=dispatcher,
         functions=tuple(functions),
+        combiners=tuple(combiners),
         region=region,
         workspace=None if workspace is None else (base / workspace).resolve(),
         release_url=release_url,
         distribution=distribution,
     )
-    for function in (spec.dispatcher, *spec.functions):
+    for function in (*spec.dispatchers, *spec.functions):
         for deployed, _ in function.deployed(project):
             if len(deployed) > LAMBDA_MAX_NAME:
                 raise SpecError(
@@ -191,20 +215,31 @@ def parse(raw: dict[str, Any], base: Path, distribution: str | None = None) -> S
     return spec
 
 
+def _dispatcher(name: str, table: dict[str, Any], *, where: str, **defaults: Any) -> Function:
+    dispatcher = _function(name, table, where=where, **defaults)
+    if dispatcher.sizes:
+        raise SpecError(f"{where}: a dispatcher takes one memory size")
+    if dispatcher.bucket_access:
+        raise SpecError(f"{where}: a dispatcher can't have bucket_access: only workers touch data")
+    return dispatcher
+
+
 def _function(
     name: str,
     table: dict[str, Any],
     *,
+    where: str | None = None,
     default_package: str | None = None,
+    default_binary: str | None = None,
     default_memory: int | None = None,
     default_timeout: int = LAMBDA_MAX_TIMEOUT,
 ) -> Function:
-    where = DISPATCHER if name == DISPATCHER else f"functions.{name}"
+    where = where or f"functions.{name}"
     if not _NAME.match(name):
         raise SpecError(f"{where}: names must be lowercase letters, digits and hyphens")
     table = dict(table)
     package = _take(table, "package", str) or default_package or name
-    binary = _take(table, "binary", str) or (DISPATCHER if name == DISPATCHER else name)
+    binary = _take(table, "binary", str) or default_binary or name
 
     memory = table.pop("memory", default_memory)
     if memory is None:
