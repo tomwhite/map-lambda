@@ -1,7 +1,7 @@
 [package]
 # Not `dispatcher`: a client project's own crate may use that name
 name = "map-lambda-dispatcher"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [[bin]]

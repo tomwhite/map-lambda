@@ -209,7 +209,7 @@ curl -X POST \
 
 ### Releasing
 
-Set the version in `pyproject.toml`, run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev, alpha, beta or release candidate version. Finally it publishes the wheels to PyPI, by [trusted publishing](https://docs.pypi.org/trusted-publishers/) from the `pypi` environment. A version can't be uploaded to PyPI twice, even once deleted.
+Set the version in `pyproject.toml` and, for the Rust crates, in `rust/Cargo.toml`, run `uv lock`, and push a tag of the same version prefixed with `v`, such as `v0.1.0`. The release workflow builds the dispatcher and echo zips with `python -m map_lambda.deploy build`, and wheels for Linux x86-64 and arm64 and macOS arm64, with the zips' checksums in each wheel (in `map_lambda/deploy/echo.sha256`), then attaches them all to a GitHub release, marked as a pre-release for a dev, alpha, beta or release candidate version. Finally it publishes the wheels to PyPI, by [trusted publishing](https://docs.pypi.org/trusted-publishers/) from the `pypi` environment. A version can't be uploaded to PyPI twice, even once deleted.
 
 <!-- --8<-- [end:development] -->
 
