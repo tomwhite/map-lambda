@@ -30,7 +30,8 @@ pub(crate) struct Call {
     pub(crate) input_key: String,
     /// The worker's payload, less its input.
     pub(crate) constant_args: Map<String, Value>,
-    /// `None` for the fewest that can hold `concurrency`.
+    /// `None` for the fewest that can hold `concurrency` and whose requests
+    /// fit Lambda's limit.
     pub(crate) dispatchers: Option<usize>,
     /// Worker invocations in flight across the whole call.
     pub(crate) concurrency: usize,
@@ -312,41 +313,52 @@ fn launch(
     inputs: Vec<Value>,
 ) -> Result<(Started, BoxStream<'static, (usize, Result<Frame, Error>)>), Error> {
     let local = call.endpoint_url.is_some();
-    let count = call
+    let mut count = call
         .dispatchers
         .unwrap_or_else(|| dispatchers_for(call.concurrency, local));
-    let shares = shares(call.concurrency, count, local)?;
-    let partitions = partitions(inputs, count);
-    let expected: Vec<usize> = partitions.iter().map(Vec::len).collect();
-
-    let payloads = partitions
-        .into_iter()
-        .zip(&shares)
-        .map(|(inputs, &max_in_flight)| {
-            serde_json::to_vec(&Request {
-                worker_function: call.worker_function.clone(),
-                constant_args: call.constant_args.clone(),
-                inputs,
-                input_key: call.input_key.clone(),
-                max_in_flight,
-                endpoint_url: call.endpoint_url.clone(),
-                retries: call.retries,
-                return_stats: call.return_stats,
-                return_outputs: call.return_outputs,
-                combine: combine.clone(),
+    let (expected, payloads) = loop {
+        let shares = shares(call.concurrency, count, local)?;
+        let partitions = partitions(inputs.iter().collect(), count);
+        let expected: Vec<usize> = partitions.iter().map(Vec::len).collect();
+        let payloads = partitions
+            .into_iter()
+            .zip(&shares)
+            .map(|(inputs, &max_in_flight)| {
+                serde_json::to_vec(&Request {
+                    worker_function: call.worker_function.clone(),
+                    constant_args: call.constant_args.clone(),
+                    inputs: inputs.into_iter().cloned().collect(),
+                    input_key: call.input_key.clone(),
+                    max_in_flight,
+                    endpoint_url: call.endpoint_url.clone(),
+                    retries: call.retries,
+                    return_stats: call.return_stats,
+                    return_outputs: call.return_outputs,
+                    combine: combine.clone(),
+                })
+                .map_err(Error::json("building a dispatcher request"))
             })
-            .map_err(Error::json("building a dispatcher request"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for (partition, payload) in payloads.iter().enumerate() {
-        if payload.len() > MAX_REQUEST_BYTES {
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((partition, bytes)) = payloads
+            .iter()
+            .map(Vec::len)
+            .enumerate()
+            .max_by_key(|&(_, bytes)| bytes)
+            .filter(|&(_, bytes)| bytes > MAX_REQUEST_BYTES)
+        else {
+            break (expected, payloads);
+        };
+        let need = (bytes * count).div_ceil(MAX_REQUEST_BYTES);
+        // a partition of one input can't be split further
+        if call.dispatchers.is_some() || count >= inputs.len() {
             return Err(Error::RequestTooLarge {
                 partition,
-                bytes: payload.len(),
-                need: (payload.len() * count).div_ceil(MAX_REQUEST_BYTES),
+                bytes,
+                need,
             });
         }
-    }
+        count = need.min(inputs.len());
+    };
 
     let started = Started {
         count,
@@ -406,7 +418,7 @@ fn check(stats: &DispatcherStats, succeeded: usize, expected: usize) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{check, start, Call};
+    use super::{check, launch, start, Call, MAX_REQUEST_BYTES};
     use crate::invoker::{Chunks, Invoker};
     use crate::Error;
     use futures::executor::block_on;
@@ -481,6 +493,65 @@ mod tests {
             Some(Err(Error::DispatcherFailed(_)))
         ));
         assert!(batches.iter().all(Result::is_ok));
+    }
+
+    fn call(dispatchers: Option<usize>) -> Call {
+        Call {
+            dispatcher_function: "dispatcher".to_string(),
+            worker_function: "worker".to_string(),
+            input_key: "i".to_string(),
+            constant_args: Map::new(),
+            dispatchers,
+            concurrency: 10,
+            retries: 0,
+            endpoint_url: None,
+            return_outputs: false,
+            return_stats: false,
+            number: 0,
+        }
+    }
+
+    /// `n` inputs of about a MiB each.
+    fn mebibytes(n: usize) -> Vec<serde_json::Value> {
+        (0..n).map(|_| json!("x".repeat(1024 * 1024))).collect()
+    }
+
+    #[test]
+    fn auto_adds_dispatchers_until_each_request_fits() {
+        let (started, _) = launch(
+            Arc::new(FailsAfterItsResult),
+            call(None),
+            None,
+            mebibytes(7),
+        )
+        .expect("fits");
+
+        assert_eq!(started.count, 2);
+        assert_eq!(started.expected, [4, 3]);
+    }
+
+    #[test]
+    fn a_request_too_large_for_the_dispatchers_given_is_refused() {
+        let refused = launch(
+            Arc::new(FailsAfterItsResult),
+            call(Some(1)),
+            None,
+            mebibytes(7),
+        );
+
+        assert!(matches!(
+            refused,
+            Err(Error::RequestTooLarge { need: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn an_input_too_large_for_any_request_is_refused() {
+        let input = vec![json!("x".repeat(MAX_REQUEST_BYTES))];
+
+        let refused = launch(Arc::new(FailsAfterItsResult), call(None), None, input);
+
+        assert!(matches!(refused, Err(Error::RequestTooLarge { .. })));
     }
 
     #[test]
