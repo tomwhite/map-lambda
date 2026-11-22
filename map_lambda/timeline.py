@@ -72,14 +72,12 @@ def generate_timeline(
     max_points: int = DEFAULT_MAX_POINTS,
 ) -> Any:
     """
-    Build the figure. Returns a matplotlib Figure for the caller to save.
+    Build the figure. Returns a matplotlib Figure for the caller to save,
+    which a notebook shows as the value of a cell.
 
     matplotlib is imported lazily: it is an optional extra
     (`map-lambda[diagnostics]`).
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     if not records:
@@ -163,4 +161,6 @@ def generate_timeline(
         fontsize=9,
     )
     fig.tight_layout()
+    # closed so a notebook's backend doesn't show it a second time
+    plt.close(fig)
     return fig

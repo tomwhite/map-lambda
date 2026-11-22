@@ -71,6 +71,16 @@ def test_records_are_joined_to_their_report_lines():
     assert (joined[0]["init_ms"], joined[1]["init_ms"]) == (None, 80)
 
 
+def test_dispatchers_are_joined_to_their_report_lines():
+    logs = Logs({"d": (1003, WARM)})
+    dispatchers = [{"req_id": "d", "call": 0, "call_start": 1000.5, "elapsed_ms": 2500.0}]
+
+    joined = fetch_reports(dispatchers, "dispatcher", logs=logs)
+
+    assert [j["req_id"] for j in joined] == ["d"]
+    assert logs.queries == [(940, 1063)]
+
+
 def test_finding_report_lines_stops_when_a_query_finds_no_more(monkeypatch):
     monkeypatch.setattr("map_lambda.cost.time.sleep", lambda s: None)
     logs = Logs({"a": (1001, WARM)})
