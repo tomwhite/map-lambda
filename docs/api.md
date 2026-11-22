@@ -26,3 +26,12 @@
     options:
       members:
         - generate_timeline
+
+## Cost
+
+::: map_lambda.cost
+    options:
+      members:
+        - fetch_reports
+        - estimate_cost
+        - Cost

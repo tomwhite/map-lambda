@@ -643,6 +643,7 @@ deploy = [
     { name = "click" },
 ]
 diagnostics = [
+    { name = "boto3" },
     { name = "matplotlib" },
 ]
 
@@ -664,6 +665,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", marker = "extra == 'deploy'", specifier = ">=1.35" },
+    { name = "boto3", marker = "extra == 'diagnostics'", specifier = ">=1.35" },
     { name = "click", marker = "extra == 'deploy'", specifier = ">=8.1" },
     { name = "matplotlib", marker = "extra == 'diagnostics'", specifier = ">=3.9" },
 ]

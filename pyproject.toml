@@ -21,6 +21,7 @@ Repository = "https://github.com/tomwhite/map-lambda"
 
 [project.optional-dependencies]
 diagnostics = [
+    "boto3>=1.35",
     "matplotlib>=3.9",
 ]
 deploy = [
