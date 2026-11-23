@@ -172,7 +172,7 @@ def fetch_reports(
     """
     Join each record with its invocation's REPORT line from CloudWatch Logs.
 
-    `records` carry map-lambda's `req_id`, `invoke_start` and `invoke_end`.
+    `records` are map-lambda's, from `invocation_stats` or `dispatcher_stats`.
     Each is returned with its REPORT line's `execution_ms`, `billed_ms`,
     `memory_size_mb`, `max_memory_mb`, and `init_ms`, which is `None` unless
     the invocation started cold. Records whose REPORT line isn't found are
@@ -204,15 +204,24 @@ def fetch_reports(
     return join(records, found)
 
 
+def span(record: Stats) -> tuple[float, float]:
+    """When a record's invocation ran, in epoch seconds."""
+    if "invoke_start" in record:
+        return record["invoke_start"], record["invoke_end"]
+    # a dispatcher's record has no invoke times, but is invoked as its call starts
+    return record["call_start"], record["call_start"] + record["elapsed_ms"] / 1000
+
+
 def query_windows(records: list[Stats]) -> list[tuple[int, int]]:
     """
     Contiguous epoch-second windows over the run, one per `SLICE_RECORDS`
     invocations, padded because the client's and Lambda's clocks only
     roughly agree.
     """
-    start = int(min(r["invoke_start"] for r in records)) - WINDOW_PADDING_SECONDS
-    end = int(max(r["invoke_end"] for r in records)) + WINDOW_PADDING_SECONDS
-    ends = sorted(r["invoke_end"] for r in records)
+    spans = [span(r) for r in records]
+    start = int(min(s for s, _ in spans)) - WINDOW_PADDING_SECONDS
+    end = int(max(e for _, e in spans)) + WINDOW_PADDING_SECONDS
+    ends = sorted(e for _, e in spans)
     cuts = {int(ends[i]) for i in range(SLICE_RECORDS, len(ends), SLICE_RECORDS)}
     bounds = sorted({start, end, *(c for c in cuts if start < c < end)})
     return list(pairwise(bounds))
