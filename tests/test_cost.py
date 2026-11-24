@@ -7,6 +7,7 @@ from map_lambda.cost import (
     REQUEST_USD,
     S3_GET_USD,
     S3_LIST_USD,
+    S3_PUT_USD,
     SLICE_RECORDS,
     estimate_cost,
     fetch_reports,
@@ -115,14 +116,14 @@ def test_estimate_cost():
     assert "1 invocations had no REPORT line" in str(cost)
 
 
-def test_s3_requests_not_counted_are_not_shown_as_none():
+def test_s3_requests_not_counted_are_not_shown():
     uncounted = estimate_cost([{"billed_ms": 1000, "memory_size_mb": 1024}])
     none_made = estimate_cost([{"billed_ms": 1000, "memory_size_mb": 1024, "s3_gets": 0}])
 
-    assert (uncounted.s3_gets, uncounted.s3_lists) == (None, None)
+    assert (uncounted.s3_gets, uncounted.s3_lists, uncounted.s3_puts) == (None, None, None)
     assert "S3      not counted" in str(uncounted)
-    assert (none_made.s3_gets, none_made.s3_lists) == (0, None)
-    assert "(0 GETs, 0 LISTs)" in str(none_made)
+    assert (none_made.s3_gets, none_made.s3_lists, none_made.s3_puts) == (0, None, None)
+    assert "$0.0000 (0 GETs)" in str(none_made)
 
 
 def test_estimate_cost_with_s3_requests():
@@ -133,16 +134,31 @@ def test_estimate_cost_with_s3_requests():
 
     cost = estimate_cost(records)
 
-    assert (cost.s3_gets, cost.s3_lists) == (5, 1)
+    assert (cost.s3_gets, cost.s3_lists, cost.s3_puts) == (5, 1, None)
     assert cost.s3_usd == pytest.approx(5 * S3_GET_USD + 1 * S3_LIST_USD)
     assert cost.total_usd == pytest.approx(1.0 * GB_SECOND_USD + 2 * REQUEST_USD + cost.s3_usd)
+    assert "(5 GETs, 1 LISTs)" in str(cost)
+
+
+def test_estimate_cost_with_s3_puts():
+    records = [
+        {"billed_ms": 1000, "memory_size_mb": 512, "s3_gets": 3, "s3_puts": 4},
+        {"billed_ms": 1000, "memory_size_mb": 512, "s3_gets": 2, "s3_puts": 1},
+    ]
+
+    cost = estimate_cost(records)
+
+    assert (cost.s3_gets, cost.s3_lists, cost.s3_puts) == (5, None, 5)
+    assert cost.s3_usd == pytest.approx(5 * S3_GET_USD + 5 * S3_PUT_USD)
+    assert "(5 GETs, 5 PUTs)" in str(cost)
 
 
 def test_costs_add():
     one = estimate_cost([{"billed_ms": 1000, "memory_size_mb": 1024, "s3_gets": 1}])
-    two = estimate_cost([{"billed_ms": 2000, "memory_size_mb": 1024}], missing=1)
+    two = estimate_cost([{"billed_ms": 2000, "memory_size_mb": 1024, "s3_puts": 2}], missing=1)
 
     both = one + two
 
-    assert (both.invocations, both.missing, both.s3_gets, both.s3_lists) == (2, 1, 1, None)
+    assert (both.invocations, both.missing) == (2, 1)
+    assert (both.s3_gets, both.s3_lists, both.s3_puts) == (1, None, 2)
     assert both.total_usd == pytest.approx(one.total_usd + two.total_usd)

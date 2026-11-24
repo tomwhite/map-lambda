@@ -32,8 +32,9 @@ PRICING_AS_OF = "2026-09-08"
 GB_SECOND_USD = 0.0000133334
 REQUEST_USD = 0.20 / 1_000_000
 S3_GET_USD = 0.0004 / 1000
+S3_PUT_USD = 0.005 / 1000
 # LIST is billed with PUT, COPY and POST
-S3_LIST_USD = 0.005 / 1000
+S3_LIST_USD = S3_PUT_USD
 
 # Lambda bills memory in GB of 1024 MB.
 MEGABYTES_PER_GIGABYTE = 1024
@@ -75,6 +76,8 @@ class Cost:
     """S3 GET requests the records counted, or `None` if none counted them."""
     s3_lists: int | None
     """S3 LIST requests the records counted, or `None` if none counted them."""
+    s3_puts: int | None
+    """S3 PUT requests the records counted, or `None` if none counted them."""
     s3_usd: float
     total_usd: float
 
@@ -91,15 +94,15 @@ class Cost:
             request_usd=self.request_usd + other.request_usd,
             s3_gets=add_counts(self.s3_gets, other.s3_gets),
             s3_lists=add_counts(self.s3_lists, other.s3_lists),
+            s3_puts=add_counts(self.s3_puts, other.s3_puts),
             s3_usd=self.s3_usd + other.s3_usd,
             total_usd=self.total_usd + other.total_usd,
         )
 
     def __str__(self) -> str:
-        if self.s3_gets is None and self.s3_lists is None:
-            s3 = "not counted"
-        else:
-            s3 = f"${self.s3_usd:.4f} ({self.s3_gets or 0:,} GETs, {self.s3_lists or 0:,} LISTs)"
+        requests = {"GETs": self.s3_gets, "LISTs": self.s3_lists, "PUTs": self.s3_puts}
+        counted = [f"{n:,} {kind}" for kind, n in requests.items() if n is not None]
+        s3 = f"${self.s3_usd:.4f} ({', '.join(counted)})" if counted else "not counted"
         lines = [
             f"cost:           ${self.total_usd:.4f} total (approximate)",
             f"                  lambda  ${self.lambda_usd:.4f} "
@@ -138,16 +141,18 @@ def estimate_cost(records: list[Stats], *, missing: int = 0) -> Cost:
     to carry into the estimate.
 
     map-lambda doesn't see the S3 requests a function makes, so S3 is priced
-    only if the caller adds `s3_gets` and `s3_lists` to the records, counted
-    by its own function. If no record carries them, the estimate's S3 counts
-    are `None`, and it prints S3 as not counted.
+    only if the caller adds `s3_gets`, `s3_lists` or `s3_puts` to the
+    records, counted by its own function. A kind no record carries has a
+    count of `None` in the estimate and isn't printed; if none is carried,
+    it prints S3 as not counted.
     """
     gb_seconds = sum(gigabytes(r["memory_size_mb"]) * r["billed_ms"] / 1000 for r in records)
     compute_usd = gb_seconds * GB_SECOND_USD
     request_usd = len(records) * REQUEST_USD
     gets = count(records, "s3_gets")
     lists = count(records, "s3_lists")
-    s3_usd = (gets or 0) * S3_GET_USD + (lists or 0) * S3_LIST_USD
+    puts = count(records, "s3_puts")
+    s3_usd = (gets or 0) * S3_GET_USD + (lists or 0) * S3_LIST_USD + (puts or 0) * S3_PUT_USD
     return Cost(
         invocations=len(records),
         missing=missing,
@@ -156,6 +161,7 @@ def estimate_cost(records: list[Stats], *, missing: int = 0) -> Cost:
         request_usd=request_usd,
         s3_gets=gets,
         s3_lists=lists,
+        s3_puts=puts,
         s3_usd=s3_usd,
         total_usd=compute_usd + request_usd + s3_usd,
     )
