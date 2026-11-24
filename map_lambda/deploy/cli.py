@@ -3,6 +3,7 @@ The `deploy`, `delete`, `list`, `allow-bucket` and `build` commands for a projec
 `main` from the project's own entry point, or added to its own click CLI from `commands`.
 """
 
+import os
 import subprocess
 import tempfile
 from collections.abc import Iterator, Sequence
@@ -301,19 +302,25 @@ def _allow_bucket(
     )
 
 
+def _session(project: Spec, region: str | None) -> Any:
+    try:
+        import boto3
+    except ImportError:
+        raise DeployError("deploying needs boto3: install map-lambda[deploy]") from None
+    if project.region is not None and region not in (None, project.region):
+        raise DeployError(f"{project.project} has to be deployed in {project.region}")
+    # boto3 doesn't read AWS_REGION, which the client invokes the functions in
+    session = boto3.Session(region_name=region or project.region or os.environ.get("AWS_REGION"))
+    if session.region_name is None:
+        raise DeployError("no AWS region: pass --region or set AWS_REGION")
+    return session
+
+
 class _Clients:
     """boto3 clients, imported only when a command needs AWS."""
 
     def __init__(self, project: Spec, region: str | None) -> None:
-        try:
-            import boto3
-        except ImportError:
-            raise DeployError("deploying needs boto3: install map-lambda[deploy]") from None
-        if project.region is not None and region not in (None, project.region):
-            raise DeployError(f"{project.project} has to be deployed in {project.region}")
-        session = boto3.Session(region_name=region or project.region)
-        if session.region_name is None:
-            raise DeployError("no AWS region: pass --region or set AWS_REGION")
+        session = _session(project, region)
         self.region: str = session.region_name
         self.cfn: Any = session.client("cloudformation")
         self.s3: Any = session.client("s3")

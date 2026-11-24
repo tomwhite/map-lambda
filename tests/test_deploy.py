@@ -1102,3 +1102,17 @@ def test_a_spec_outside_an_installed_package_has_no_release(tmp_path):
 
     with pytest.raises(SpecError, match="outside an installed package"):
         release.url(project)
+
+
+def test_a_deploy_goes_to_the_region_the_client_invokes_in(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+
+    assert cli._session(_spec(), None).region_name == "us-east-1"
+    assert cli._session(_spec(), "us-west-2").region_name == "us-west-2"
+    assert cli._session(dataclasses.replace(_spec(), region="ap-south-1"), None).region_name == (
+        "ap-south-1"
+    )
+
+    monkeypatch.delenv("AWS_REGION")
+    assert cli._session(_spec(), None).region_name == "eu-west-1"
