@@ -1,4 +1,4 @@
-# Map-lambda
+# <img src="https://raw.githubusercontent.com/tomwhite/map-lambda/main/docs/assets/map-lambda.svg" alt="" height="32"> map-lambda
 
 <!-- --8<-- [start:intro] -->
 Fan out a Rust function to a thousand AWS Lambdas from Python in about a second.
