@@ -86,13 +86,14 @@ impl LambdaInvoker {
             .await
             .map_err(|e| Error::InvokeFailed(error_chain(&e)))?;
 
-        let chunks = futures::stream::unfold(Some(invoked.event_stream), |state| async move {
-            let mut events = state?;
+        let state = Some((invoked.event_stream, function_name.to_string()));
+        let chunks = futures::stream::unfold(state, |state| async move {
+            let (mut events, function) = state?;
             match events.recv().await {
                 Ok(None) => None,
                 Ok(Some(Event::PayloadChunk(update))) => {
                     let bytes = update.payload.map(Blob::into_inner).unwrap_or_default();
-                    Some((Ok(bytes), Some(events)))
+                    Some((Ok(bytes), Some((events, function))))
                 }
                 // The HTTP status was 200 before the function had done
                 // anything, so a failure can only arrive here.
@@ -100,14 +101,14 @@ impl LambdaInvoker {
                     Some(code) => {
                         let detail = complete.error_details.unwrap_or_default();
                         let failed = format!("{code} {detail}").trim().to_string();
-                        Some((
-                            Err(Error::DispatcherFailed(format!("{failed} (mid-stream)"))),
-                            None,
-                        ))
+                        let reason = format!(
+                            "{failed} (mid-stream); its log group is /aws/lambda/{function}"
+                        );
+                        Some((Err(Error::DispatcherFailed { function, reason }), None))
                     }
-                    None => Some((Ok(Vec::new()), Some(events))),
+                    None => Some((Ok(Vec::new()), Some((events, function)))),
                 },
-                Ok(Some(_)) => Some((Ok(Vec::new()), Some(events))),
+                Ok(Some(_)) => Some((Ok(Vec::new()), Some((events, function)))),
                 Err(e) => Some((Err(Error::InvokeFailed(error_chain(&e))), None)),
             }
         });
@@ -128,7 +129,10 @@ impl LambdaInvoker {
             .await
             .map_err(|e| Error::InvokeFailed(error_chain(&e)))?;
         if let Some(failed) = invoked.function_error {
-            return Err(Error::DispatcherFailed(failed));
+            return Err(Error::DispatcherFailed {
+                function: function_name.to_string(),
+                reason: failed,
+            });
         }
         let body = invoked.payload.map(Blob::into_inner).unwrap_or_default();
         Ok(Box::pin(futures::stream::once(async move { Ok(body) })))

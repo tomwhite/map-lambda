@@ -34,6 +34,7 @@ async def run(args: argparse.Namespace) -> tuple[float, list[dict], list[Any]]:
     """One round of invocations, returning the wall clock, the records and the outputs."""
     invocations: list[dict] = []
     async with Session(
+        project=args.project,
         endpoint_url=args.endpoint_url or (LOCAL_ENDPOINT_URL if args.local else None),
         dispatchers=args.dispatchers,
         concurrency=args.concurrency,
@@ -59,6 +60,11 @@ def main() -> None:
     parser.add_argument("--invocations", type=int, default=1000)
     parser.add_argument("--concurrency", type=int, default=100)
     parser.add_argument("--dispatchers", type=int, default=1)
+    parser.add_argument(
+        "--project",
+        default="map-lambda",
+        help="the project echo was deployed as (default: %(default)s); unused locally",
+    )
     parser.add_argument(
         "--local", action="store_true", help=f"against {LOCAL_ENDPOINT_URL} rather than AWS"
     )
