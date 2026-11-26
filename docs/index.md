@@ -1,4 +1,4 @@
-# map-lambda
+# :map-lambda: map-lambda
 
 --8<-- "README.md:intro"
 
