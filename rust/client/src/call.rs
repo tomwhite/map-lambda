@@ -455,7 +455,10 @@ mod tests {
             let summary = json!({"Summary": stats(1)});
             let chunks: Vec<Result<Vec<u8>, Error>> = vec![
                 Ok(format!("{completed}\n{summary}\n").into_bytes()),
-                Err(Error::DispatcherFailed("the stream failed".to_string())),
+                Err(Error::DispatcherFailed {
+                    function: "dispatcher".to_string(),
+                    reason: "the stream failed".to_string(),
+                }),
             ];
             Box::pin(async move { Ok(Box::pin(futures::stream::iter(chunks)) as Chunks) })
         }
@@ -490,7 +493,7 @@ mod tests {
 
         assert!(matches!(
             batches.pop(),
-            Some(Err(Error::DispatcherFailed(_)))
+            Some(Err(Error::DispatcherFailed { .. }))
         ));
         assert!(batches.iter().all(Result::is_ok));
     }

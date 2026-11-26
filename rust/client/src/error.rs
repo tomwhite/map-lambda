@@ -72,8 +72,8 @@ pub enum Error {
     )]
     NoSummary,
 
-    #[error("the dispatcher failed: {0}")]
-    DispatcherFailed(String),
+    #[error("the dispatcher {function} failed: {reason}")]
+    DispatcherFailed { function: String, reason: String },
 
     #[error("invoking Lambda failed: {0}")]
     InvokeFailed(String),

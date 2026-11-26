@@ -149,6 +149,15 @@ asyncio.run(main())
 '
 ```
 
+Or time a round of 1,000 `echo` invocations with the latency benchmark:
+
+```shell
+curl -LO https://raw.githubusercontent.com/tomwhite/map-lambda/main/benchmarks/echo_latency.py
+uv run --python 3.12 --no-project --with map-lambda echo_latency.py --concurrency 990
+```
+
+Run it twice: the first round is cold, the second warm. `--concurrency 990` keeps under the default limit of 1,000 concurrent executions.
+
 The same commands work in [AWS CloudShell](https://aws.amazon.com/cloudshell/), which has credentials and a region already set, once uv is installed:
 
 ```shell
